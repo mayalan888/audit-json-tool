@@ -313,15 +313,14 @@ def generate_json_logic(excel_file, template_data):
 
 st.title("🚀 审计数据 Excel 转 JSON 工具")
 st.markdown("""
-本工具支持 **金磁、复锦、上海妍发** 等格式的数据表。
-它会自动识别中英文地址、提取证书范围、自动计算审核周期，并填充文件清单。
+本工具会自动识别中英文地址、提取证书范围、自动计算审核周期，并填充文件清单。
 """)
 st.markdown("---")
 
 # 1. 侧边栏：模板配置
 with st.sidebar:
     st.header("⚙️ 设置")
-    st.info("默认使用服务器上的 `金磁.json` 作为模板。如果您有新的模板结构，可以在此上传覆盖。")
+    st.info("默认使用服务器上的json文件作为模板。如果您有新的模板结构，可以在此上传覆盖。")
     uploaded_template = st.file_uploader("上传自定义模板 JSON (可选)", type=["json"])
 
 # 2. 加载模板
@@ -390,3 +389,4 @@ if uploaded_files:
             st.divider()
 else:
     st.info("👋 请在上方上传 Excel 文件开始工作。")
+
