@@ -10,8 +10,8 @@ from datetime import datetime, timedelta
 
 # --- 页面配置 ---
 st.set_page_config(
-    page_title="IATF 审计转换工具 (精准定位版)",
-    page_icon="🎯",
+    page_title="IATF 审计转换工具 (跨行修复版)",
+    page_icon="🛡️",
     layout="wide"
 )
 
@@ -27,7 +27,6 @@ def generate_json_logic(excel_file, template_data):
     except Exception as e:
         raise ValueError(f"Excel 读取失败: {str(e)}")
 
-    # 通用搜索函数
     def find_val_by_key(df, keywords, col_offset=1):
         if df.empty: return ""
         for r in range(df.shape[0]):
@@ -56,29 +55,41 @@ def generate_json_logic(excel_file, template_data):
     ccaa_raw = find_val_by_key(db_df, ["审核员CCAA", "CCAA"])
     caa_no = ""
     if ccaa_raw:
-        match = re.search(r'(?:CCAA[:：\s-])\s*(.*)', ccaa_raw, re.IGNORECASE)
-        caa_no = match.group(1).strip() if match else ccaa_raw.strip()
+        # 同样开启 DOTALL 模式，防止 CCAA 编号也被换行截断
+        match = re.search(r'(?:CCAA[:：\s-])\s*(.*)', ccaa_raw, re.IGNORECASE | re.DOTALL)
+        if match:
+            caa_no = match.group(1).strip()
+        else:
+            caa_no = ccaa_raw.strip()
 
-    # --- 3. IATF ID (AuditorId) 精准逻辑 ---
-    # 逻辑：在“信息”表中寻找“IATF Card：”，并在该行提取“IATF”之后的内容
+    # --- 3. IATF ID (AuditorId) 跨行提取逻辑 ---
     auditor_id = ""
     if not info_df.empty:
         for r in range(info_df.shape[0]):
             for c in range(info_df.shape[1]):
                 cell_text = str(info_df.iloc[r, c])
+                
+                # 定位 "IATF Card"
                 if "IATF Card" in cell_text:
-                    # 情况A：ID 和标签在同一个单元格里
-                    # 情况B：ID 在右侧单元格里
                     search_scope = cell_text
                     if c + 1 < info_df.shape[1]:
                         search_scope += " " + str(info_df.iloc[r, c+1])
                     
-                    # 使用正则寻找 "IATF" 字符串之后的所有内容
-                    # 匹配 IATF 及其后的冒号/空格，抓取后面所有的内容 (.*)
-                    match = re.search(r'IATF[:：\s-]*\s*(.*)', search_scope, re.IGNORECASE)
+                    # 核心修正：
+                    # 1. re.DOTALL: 让点号 (.) 能匹配换行符 (\n)
+                    # 2. 逻辑：寻找 "IATF Card" 后面的第二个 "IATF"
+                    
+                    # 尝试匹配嵌套格式： "IATF Card ... IATF: GZH 12345"
+                    match = re.search(r'IATF\s*Card.*?IATF[:：\s-]*\s*(.*)', search_scope, re.IGNORECASE | re.DOTALL)
+                    
                     if match:
                         auditor_id = match.group(1).strip()
-                        break
+                    else:
+                        # 如果没有嵌套，直接找 "IATF:" 后的内容
+                        match_simple = re.search(r'IATF[:：\s-]*\s*(.*)', search_scope, re.IGNORECASE | re.DOTALL)
+                        if match_simple:
+                            auditor_id = match_simple.group(1).strip()
+                    break
             if auditor_id: break
 
     # --- 4. 日期处理 ---
@@ -104,12 +115,9 @@ def generate_json_logic(excel_file, template_data):
         "AuditTeam": [{
             "Name": auditor_name,
             "CaaNo": caa_no,
-            "AuditorId": auditor_id,        # 映射至 AuditorId
+            "AuditorId": auditor_id,        # 映射最终结果
             "AuditDaysPerformed": 1.5,
-            "DatesOnSite": [
-                {"Date": start_iso, "Day": 1}, 
-                {"Date": end_iso, "Day": 0.5}
-            ],
+            "DatesOnSite": [{"Date": start_iso, "Day": 1}, {"Date": end_iso, "Day": 0.5}],
             "PlanningTime": "0.0000"
         }]
     })
@@ -149,8 +157,8 @@ def generate_json_logic(excel_file, template_data):
     return final_json
 
 # --- Streamlit UI ---
-st.title("🛡️ 审计数据转换工具 (v9.9)")
-st.caption("已优化：从『信息』子表精准提取 IATF ID | 姓名重排 | CCAA 多编号")
+st.title("🛡️ 审计数据转换工具 (v10.1)")
+st.caption("修复: 开启 DOTALL 模式，解决 IATF ID 因换行符导致的截断问题 (GZH)")
 
 uploaded_files = st.file_uploader("上传 Excel 文件", type=["xlsx"], accept_multiple_files=True)
 
@@ -164,22 +172,18 @@ if uploaded_files:
         try:
             res_json = generate_json_logic(file, template)
             team = res_json["AuditData"]["AuditTeam"][0]
-            
             st.success(f"✅ {file.name} 转换成功")
+            # 预览结果
             st.code(f"""
 姓名: {team['Name']}
 CCAA: {team['CaaNo']}
 IATF ID: {team['AuditorId']}
             """, language="yaml")
-            
-            st.download_button(
-                label=f"📥 下载 JSON ({file.name})",
-                data=json.dumps(res_json, indent=2, ensure_ascii=False),
-                file_name=file.name.replace(".xlsx", ".json")
-            )
+            st.download_button(label=f"📥 下载 JSON ({file.name})", data=json.dumps(res_json, indent=2, ensure_ascii=False), file_name=file.name.replace(".xlsx", ".json"))
             st.divider()
         except Exception as e:
             st.error(f"❌ 处理失败: {e}")
+
 
 
 
