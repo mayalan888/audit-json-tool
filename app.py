@@ -10,8 +10,8 @@ from datetime import datetime, timedelta
 
 # --- 页面配置 ---
 st.set_page_config(
-    page_title="IATF 审计转换工具 (姓名重排版)",
-    page_icon="👤",
+    page_title="IATF 审计转换工具 (全能提取版)",
+    page_icon="🛡️",
     layout="wide"
 )
 
@@ -21,6 +21,7 @@ def generate_json_logic(excel_file, template_data):
     
     try:
         xls = pd.ExcelFile(excel_file)
+        # 1. 读取工作表
         db_df = pd.read_excel(xls, sheet_name='数据库', header=None) if '数据库' in xls.sheet_names else pd.read_excel(xls, sheet_name=0, header=None)
         proc_df = pd.read_excel(xls, sheet_name='过程清单') if '过程清单' in xls.sheet_names else pd.DataFrame()
         info_df = pd.read_excel(xls, sheet_name='信息', header=None) if '信息' in xls.sheet_names else pd.DataFrame()
@@ -38,44 +39,47 @@ def generate_json_logic(excel_file, template_data):
                             return str(df.iloc[r, c + col_offset]).strip()
         return ""
 
-    # --- 1. 提取姓名并执行重排逻辑 ---
+    # --- 1. 姓名重排逻辑 ---
     raw_name_full = find_val_by_key(db_df, ["姓名", "Auditor Name"])
-    # 移除前缀
     raw_name = raw_name_full.replace("姓名:", "").replace("Name:", "").strip() if raw_name_full else ""
     
     auditor_name = raw_name
-    # 逻辑：去除中文，提取英文部分进行重排
     english_part = re.sub(r'[\u4e00-\u9fff]', '', raw_name).strip()
     if english_part:
         parts = english_part.split()
-        # 如果格式是 "ZHENG Ninglu" (姓大写，名首字母大写)，则转为 "Ninglu ZHENG"
         if len(parts) >= 2 and parts[0].isupper() and not parts[1].isupper():
             auditor_name = f"{parts[1]} {parts[0]}"
         else:
             auditor_name = english_part
 
-    # --- 2. 提取 CCAA 编号 (支持逗号分隔) ---
+    # --- 2. CCAA 编号 (提取 CCAA: 后所有内容，包含逗号及其后编号) ---
     ccaa_raw = find_val_by_key(db_df, ["审核员CCAA", "CCAA"])
     caa_no = ""
     if ccaa_raw:
-        # 匹配 CCAA: 之后的所有字符（包括逗号后的第二个编号）
-        match = re.search(r'(?:CCAA[:：])\s*(.*)', ccaa_raw, re.IGNORECASE)
+        # 匹配 CCAA: 之后的所有字符
+        match = re.search(r'(?:CCAA[:：\s-])\s*(.*)', ccaa_raw, re.IGNORECASE)
         caa_no = match.group(1).strip() if match else ccaa_raw.strip()
 
-    # --- 3. 提取 IATF ID (支持非数字字符串) ---
+    # --- 3. IATF ID (AuditorId) - 强化提取逻辑 ---
     auditor_id = ""
-    iatf_raw = find_val_by_key(info_df, ["IATF Card", "IATF"])
-    if iatf_raw:
-        # 匹配 IATF: 之后的字符串，直到遇到空格或结尾
-        match = re.search(r'(?:IATF[:：])\s*(\S+)', iatf_raw, re.IGNORECASE)
-        if match: auditor_id = match.group(1).strip()
+    # 逻辑：在“信息”表中寻找包含 IATF 的格子的右侧内容
+    iatf_raw = find_val_by_key(info_df, ["IATF Card", "IATF卡号", "IATF"])
     
-    # 兜底搜寻
+    if iatf_raw:
+        # 正则说明：匹配 IATF 后面跟随的冒号、空格或横杠，然后抓取后面所有的连续非空白字符
+        match = re.search(r'(?:IATF[:：\s-]*)\s*(\S+)', iatf_raw, re.IGNORECASE)
+        if match:
+            auditor_id = match.group(1).strip()
+        else:
+            auditor_id = iatf_raw.strip()
+    
+    # 兜底：如果在信息表没提取到，在数据库表的 CCAA 单元格里找（针对合并写的格式）
     if not auditor_id and ccaa_raw and "IATF" in ccaa_raw:
-        match = re.search(r'IATF[:：-]?\s*(\S+)', ccaa_raw, re.IGNORECASE)
-        if match: auditor_id = match.group(1).strip()
+        match = re.search(r'IATF[:：\s-]*\s*(\S+)', ccaa_raw, re.IGNORECASE)
+        if match:
+            auditor_id = match.group(1).strip()
 
-    # --- 4. 日期与其他字段 ---
+    # --- 4. 日期处理 ---
     start_date_raw = find_val_by_key(db_df, ["审核开始时间"])
     end_date_raw = find_val_by_key(db_df, ["审核结束时间"])
     
@@ -96,9 +100,9 @@ def generate_json_logic(excel_file, template_data):
         "AuditDate": {"Start": start_iso, "End": end_iso},
         "CbIdentificationNo": find_val_by_key(db_df, ["认证机构识别号"]),
         "AuditTeam": [{
-            "Name": auditor_name,           # 输出例如 "Ninglu ZHENG"
-            "CaaNo": caa_no,                # 输出例如 "2023-..., 2025-..."
-            "AuditorId": auditor_id,        # 输出例如 "6-AUD-..."
+            "Name": auditor_name,
+            "CaaNo": caa_no,
+            "AuditorId": auditor_id,        # 关键修正：现在支持 6-AUD-C-... 等非纯数字格式
             "AuditDaysPerformed": 1.5,
             "DatesOnSite": [
                 {"Date": start_iso, "Day": 1}, 
@@ -108,7 +112,7 @@ def generate_json_logic(excel_file, template_data):
         }]
     })
 
-    # 其他信息
+    # 其他组织信息
     if "OrganizationInformation" not in final_json: final_json["OrganizationInformation"] = {}
     final_json["OrganizationInformation"].update({
         "OrganizationName": find_val_by_key(db_df, ["组织名称"]),
@@ -128,7 +132,7 @@ def generate_json_logic(excel_file, template_data):
             proc_obj = {
                 "Id": str(int(time.time() * 1000) + idx),
                 "ProcessName": p_name,
-                "AuditNotes": [{"Id": int(time.time()*1000)+idx+123, "AuditorId": auditor_id}],
+                "AuditNotes": [{"Id": int(time.time()*1000)+idx+200, "AuditorId": auditor_id}],
                 "ManufacturingProcess": "0", "OnSiteProcess": "1", "RemoteProcess": "0"
             }
             for col in clause_cols:
@@ -145,8 +149,8 @@ def generate_json_logic(excel_file, template_data):
     return final_json
 
 # --- Streamlit UI ---
-st.title("🚀 精准审计数据转换工具")
-st.caption("v9.4 | 恢复姓名中英文重排逻辑 | 支持多编号提取")
+st.title("🛡️ 审计数据全能转换工具")
+st.caption("v9.5 | 修正 IATF ID 提取规则 | 完整提取 CCAA 多编号 | 姓名自动重排")
 
 uploaded_files = st.file_uploader("上传 Excel 文件", type=["xlsx"], accept_multiple_files=True)
 
@@ -162,11 +166,12 @@ if uploaded_files:
             team = res_json["AuditData"]["AuditTeam"][0]
             
             st.success(f"✅ {file.name} 转换成功")
-            st.json({
-                "最终姓名 (Name)": team["Name"],
-                "CCAA编号 (CaaNo)": team["CaaNo"],
-                "IATF ID (AuditorId)": team["AuditorId"]
-            })
+            # 实时预览
+            st.code(f"""
+姓名: {team['Name']}
+CCAA: {team['CaaNo']}
+IATF ID: {team['AuditorId']}
+            """, language="yaml")
             
             st.download_button(
                 label=f"📥 下载 JSON ({file.name})",
