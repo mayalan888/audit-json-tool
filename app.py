@@ -10,7 +10,7 @@ from datetime import datetime, timedelta
 
 # --- 页面配置 ---
 st.set_page_config(
-    page_title="IATF 审计转换工具 (跨行修复版)",
+    page_title="IATF 审计转换工具 (v11.0)",
     page_icon="🛡️",
     layout="wide"
 )
@@ -55,40 +55,44 @@ def generate_json_logic(excel_file, template_data):
     ccaa_raw = find_val_by_key(db_df, ["审核员CCAA", "CCAA"])
     caa_no = ""
     if ccaa_raw:
-        # 同样开启 DOTALL 模式，防止 CCAA 编号也被换行截断
         match = re.search(r'(?:CCAA[:：\s-])\s*(.*)', ccaa_raw, re.IGNORECASE | re.DOTALL)
         if match:
             caa_no = match.group(1).strip()
         else:
             caa_no = ccaa_raw.strip()
 
-    # --- 3. IATF ID (AuditorId) 跨行提取逻辑 ---
+    # --- 3. IATF ID (AuditorId) 左右分离提取逻辑 ---
     auditor_id = ""
     if not info_df.empty:
         for r in range(info_df.shape[0]):
             for c in range(info_df.shape[1]):
                 cell_text = str(info_df.iloc[r, c])
                 
-                # 定位 "IATF Card"
-                if "IATF Card" in cell_text:
-                    search_scope = cell_text
+                # 步骤1：定位 "IATF Card" 所在的格子
+                if "IATF Card" in cell_text or "IATF卡号" in cell_text:
+                    raw_id_text = ""
+                    
+                    # 步骤2：优先取右边格子的内容 (对应截图情况)
                     if c + 1 < info_df.shape[1]:
-                        search_scope += " " + str(info_df.iloc[r, c+1])
+                        right_cell_val = str(info_df.iloc[r, c+1]).strip()
+                        # 如果右边格子不为空，且不是NaN，就用它
+                        if right_cell_val and right_cell_val.lower() != 'nan':
+                            raw_id_text = right_cell_val
                     
-                    # 核心修正：
-                    # 1. re.DOTALL: 让点号 (.) 能匹配换行符 (\n)
-                    # 2. 逻辑：寻找 "IATF Card" 后面的第二个 "IATF"
+                    # 兜底：如果右边没东西，可能是合并单元格，取当前格子里的内容
+                    if not raw_id_text:
+                        raw_id_text = cell_text
                     
-                    # 尝试匹配嵌套格式： "IATF Card ... IATF: GZH 12345"
-                    match = re.search(r'IATF\s*Card.*?IATF[:：\s-]*\s*(.*)', search_scope, re.IGNORECASE | re.DOTALL)
+                    # 步骤3：精准清洗
+                    # 现在的 raw_id_text 应该是 "IATF: 6-AUD-C-2410-1773-2260"
                     
-                    if match:
-                        auditor_id = match.group(1).strip()
-                    else:
-                        # 如果没有嵌套，直接找 "IATF:" 后的内容
-                        match_simple = re.search(r'IATF[:：\s-]*\s*(.*)', search_scope, re.IGNORECASE | re.DOTALL)
-                        if match_simple:
-                            auditor_id = match_simple.group(1).strip()
+                    # 先去掉 "IATF Card" (如果是合并单元格情况)
+                    clean_text = re.sub(r'IATF\s*Card[:：\s-]*', '', raw_id_text, flags=re.IGNORECASE).strip()
+                    
+                    # 再去掉开头的 "IATF:" 或 "IATF" (针对截图情况)
+                    clean_text = re.sub(r'^IATF[:：\s-]*', '', clean_text, flags=re.IGNORECASE).strip()
+                    
+                    auditor_id = clean_text
                     break
             if auditor_id: break
 
@@ -115,7 +119,7 @@ def generate_json_logic(excel_file, template_data):
         "AuditTeam": [{
             "Name": auditor_name,
             "CaaNo": caa_no,
-            "AuditorId": auditor_id,        # 映射最终结果
+            "AuditorId": auditor_id,        # 最终输出清洗后的 ID
             "AuditDaysPerformed": 1.5,
             "DatesOnSite": [{"Date": start_iso, "Day": 1}, {"Date": end_iso, "Day": 0.5}],
             "PlanningTime": "0.0000"
@@ -157,8 +161,8 @@ def generate_json_logic(excel_file, template_data):
     return final_json
 
 # --- Streamlit UI ---
-st.title("🛡️ 审计数据转换工具 (v10.1)")
-st.caption("修复: 开启 DOTALL 模式，解决 IATF ID 因换行符导致的截断问题 (GZH)")
+st.title("🛡️ 审计数据转换工具 (v11.0)")
+st.caption("修复: 精准分离 IATF Card 标题与内容，完美去除前缀")
 
 uploaded_files = st.file_uploader("上传 Excel 文件", type=["xlsx"], accept_multiple_files=True)
 
@@ -183,6 +187,7 @@ IATF ID: {team['AuditorId']}
             st.divider()
         except Exception as e:
             st.error(f"❌ 处理失败: {e}")
+
 
 
 
