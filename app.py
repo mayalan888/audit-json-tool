@@ -10,7 +10,7 @@ from datetime import datetime, timedelta
 
 # --- 页面配置 ---
 st.set_page_config(
-    page_title="IATF 审计转换工具 (v11.0)",
+    page_title="IATF 审计转换工具 (v12.0)",
     page_icon="🛡️",
     layout="wide"
 )
@@ -21,6 +21,7 @@ def generate_json_logic(excel_file, template_data):
     
     try:
         xls = pd.ExcelFile(excel_file)
+        # 1. 读取工作表 (智能索引)
         db_df = pd.read_excel(xls, sheet_name='数据库', header=None) if '数据库' in xls.sheet_names else pd.read_excel(xls, sheet_name=0, header=None)
         proc_df = pd.read_excel(xls, sheet_name='过程清单') if '过程清单' in xls.sheet_names else pd.DataFrame()
         info_df = pd.read_excel(xls, sheet_name='信息', header=None) if '信息' in xls.sheet_names else pd.DataFrame()
@@ -51,48 +52,46 @@ def generate_json_logic(excel_file, template_data):
         else:
             auditor_name = english_part
 
-    # --- 2. CCAA 编号 ---
+    # --- 2. CCAA 编号 (完整提取逗号前后内容) ---
     ccaa_raw = find_val_by_key(db_df, ["审核员CCAA", "CCAA"])
     caa_no = ""
     if ccaa_raw:
+        # 匹配 CCAA: 之后的所有字符 (跨行匹配)
         match = re.search(r'(?:CCAA[:：\s-])\s*(.*)', ccaa_raw, re.IGNORECASE | re.DOTALL)
-        if match:
-            caa_no = match.group(1).strip()
-        else:
-            caa_no = ccaa_raw.strip()
+        caa_no = match.group(1).strip() if match else ccaa_raw.strip()
 
-    # --- 3. IATF ID (AuditorId) 左右分离提取逻辑 ---
+    # --- 3. IATF ID (AuditorId) 精准逻辑升级 ---
     auditor_id = ""
     if not info_df.empty:
         for r in range(info_df.shape[0]):
             for c in range(info_df.shape[1]):
                 cell_text = str(info_df.iloc[r, c])
                 
-                # 步骤1：定位 "IATF Card" 所在的格子
+                # 步骤 A：定位包含 "IATF Card" 的格子
                 if "IATF Card" in cell_text or "IATF卡号" in cell_text:
-                    raw_id_text = ""
-                    
-                    # 步骤2：优先取右边格子的内容 (对应截图情况)
+                    # 优先取右侧格子的内容
+                    target_text = ""
                     if c + 1 < info_df.shape[1]:
-                        right_cell_val = str(info_df.iloc[r, c+1]).strip()
-                        # 如果右边格子不为空，且不是NaN，就用它
-                        if right_cell_val and right_cell_val.lower() != 'nan':
-                            raw_id_text = right_cell_val
+                        val = str(info_df.iloc[r, c+1]).strip()
+                        if val and val.lower() != 'nan':
+                            target_text = val
                     
-                    # 兜底：如果右边没东西，可能是合并单元格，取当前格子里的内容
-                    if not raw_id_text:
-                        raw_id_text = cell_text
+                    # 兜底：如果右侧为空，可能在当前格内
+                    if not target_text:
+                        target_text = cell_text
                     
-                    # 步骤3：精准清洗
-                    # 现在的 raw_id_text 应该是 "IATF: 6-AUD-C-2410-1773-2260"
-                    
-                    # 先去掉 "IATF Card" (如果是合并单元格情况)
-                    clean_text = re.sub(r'IATF\s*Card[:：\s-]*', '', raw_id_text, flags=re.IGNORECASE).strip()
-                    
-                    # 再去掉开头的 "IATF:" 或 "IATF" (针对截图情况)
-                    clean_text = re.sub(r'^IATF[:：\s-]*', '', clean_text, flags=re.IGNORECASE).strip()
-                    
-                    auditor_id = clean_text
+                    # 步骤 B：寻找该字符串中【最后一次】出现 IATF 之后的内容
+                    # 解决 GZH 这种截断问题，确保抓取 IATF 后面的长字符串
+                    if "IATF" in target_text.upper():
+                        # 找到 IATF 的位置 (不区分大小写)
+                        pos = target_text.upper().rfind("IATF")
+                        # 截取从 IATF 之后开始的所有字符
+                        after_iatf = target_text[pos + 4:] 
+                        # 清除开头的冒号、空格、横杠
+                        auditor_id = re.sub(r'^[:：\s-]+', '', after_iatf).strip()
+                    else:
+                        # 如果没有 IATF 关键字，则取整个格子
+                        auditor_id = target_text
                     break
             if auditor_id: break
 
@@ -119,7 +118,7 @@ def generate_json_logic(excel_file, template_data):
         "AuditTeam": [{
             "Name": auditor_name,
             "CaaNo": caa_no,
-            "AuditorId": auditor_id,        # 最终输出清洗后的 ID
+            "AuditorId": auditor_id,        # 最终输出截图中的编号
             "AuditDaysPerformed": 1.5,
             "DatesOnSite": [{"Date": start_iso, "Day": 1}, {"Date": end_iso, "Day": 0.5}],
             "PlanningTime": "0.0000"
@@ -161,8 +160,8 @@ def generate_json_logic(excel_file, template_data):
     return final_json
 
 # --- Streamlit UI ---
-st.title("🛡️ 审计数据转换工具 (v11.0)")
-st.caption("修复: 精准分离 IATF Card 标题与内容，完美去除前缀")
+st.title("🛡️ 审计数据转换工具 (v12.0)")
+st.caption("修复: 采用右侧单元格重定向逻辑，确保完整提取 IATF ID")
 
 uploaded_files = st.file_uploader("上传 Excel 文件", type=["xlsx"], accept_multiple_files=True)
 
@@ -177,7 +176,6 @@ if uploaded_files:
             res_json = generate_json_logic(file, template)
             team = res_json["AuditData"]["AuditTeam"][0]
             st.success(f"✅ {file.name} 转换成功")
-            # 预览结果
             st.code(f"""
 姓名: {team['Name']}
 CCAA: {team['CaaNo']}
@@ -187,6 +185,7 @@ IATF ID: {team['AuditorId']}
             st.divider()
         except Exception as e:
             st.error(f"❌ 处理失败: {e}")
+
 
 
 
