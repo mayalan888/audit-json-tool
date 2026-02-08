@@ -10,8 +10,8 @@ from datetime import datetime, timedelta
 
 # --- 页面配置 ---
 st.set_page_config(
-    page_title="IATF 审计转换工具 (终极修正版)",
-    page_icon="🛡️",
+    page_title="IATF 审计转换工具 (精准定位版)",
+    page_icon="🎯",
     layout="wide"
 )
 
@@ -27,6 +27,7 @@ def generate_json_logic(excel_file, template_data):
     except Exception as e:
         raise ValueError(f"Excel 读取失败: {str(e)}")
 
+    # 通用搜索函数
     def find_val_by_key(df, keywords, col_offset=1):
         if df.empty: return ""
         for r in range(df.shape[0]):
@@ -38,7 +39,7 @@ def generate_json_logic(excel_file, template_data):
                             return str(df.iloc[r, c + col_offset]).strip()
         return ""
 
-    # --- 1. 姓名重排逻辑 (保持不变) ---
+    # --- 1. 姓名重排逻辑 ---
     raw_name_full = find_val_by_key(db_df, ["姓名", "Auditor Name"])
     raw_name = raw_name_full.replace("姓名:", "").replace("Name:", "").strip() if raw_name_full else ""
     
@@ -51,32 +52,34 @@ def generate_json_logic(excel_file, template_data):
         else:
             auditor_name = english_part
 
-    # --- 2. CCAA 编号 (贪婪匹配，含逗号) ---
+    # --- 2. CCAA 编号 ---
     ccaa_raw = find_val_by_key(db_df, ["审核员CCAA", "CCAA"])
     caa_no = ""
     if ccaa_raw:
         match = re.search(r'(?:CCAA[:：\s-])\s*(.*)', ccaa_raw, re.IGNORECASE)
         caa_no = match.group(1).strip() if match else ccaa_raw.strip()
 
-    # --- 3. IATF ID (AuditorId) - 修正点: 开启贪婪匹配 ---
+    # --- 3. IATF ID (AuditorId) 精准逻辑 ---
+    # 逻辑：在“信息”表中寻找“IATF Card：”，并在该行提取“IATF”之后的内容
     auditor_id = ""
-    iatf_raw = find_val_by_key(info_df, ["IATF Card", "IATF卡号", "IATF"])
-    
-    if iatf_raw:
-        # 旧规则: (\S+) -> 遇到空格就停，导致 "GZH 12345" 变成了 "GZH"
-        # 新规则: (.*)  -> 抓取 IATF: 之后的所有内容，包含空格
-        match = re.search(r'(?:IATF(?:[\s\w]*Card)?[:：\s-]*)\s*(.*)', iatf_raw, re.IGNORECASE)
-        if match:
-            auditor_id = match.group(1).strip()
-        else:
-            auditor_id = iatf_raw.strip()
-    
-    # 兜底：在数据库表中找
-    if not auditor_id and ccaa_raw and "IATF" in ccaa_raw:
-        # 同样开启贪婪匹配
-        match = re.search(r'IATF[:：\s-]*\s*(.*)', ccaa_raw, re.IGNORECASE)
-        if match:
-            auditor_id = match.group(1).strip()
+    if not info_df.empty:
+        for r in range(info_df.shape[0]):
+            for c in range(info_df.shape[1]):
+                cell_text = str(info_df.iloc[r, c])
+                if "IATF Card" in cell_text:
+                    # 情况A：ID 和标签在同一个单元格里
+                    # 情况B：ID 在右侧单元格里
+                    search_scope = cell_text
+                    if c + 1 < info_df.shape[1]:
+                        search_scope += " " + str(info_df.iloc[r, c+1])
+                    
+                    # 使用正则寻找 "IATF" 字符串之后的所有内容
+                    # 匹配 IATF 及其后的冒号/空格，抓取后面所有的内容 (.*)
+                    match = re.search(r'IATF[:：\s-]*\s*(.*)', search_scope, re.IGNORECASE)
+                    if match:
+                        auditor_id = match.group(1).strip()
+                        break
+            if auditor_id: break
 
     # --- 4. 日期处理 ---
     start_date_raw = find_val_by_key(db_df, ["审核开始时间"])
@@ -92,7 +95,7 @@ def generate_json_logic(excel_file, template_data):
     start_iso = fmt_iso(start_date_raw)
     end_iso = fmt_iso(end_date_raw)
 
-    # --- 5. 组装 AuditTeam ---
+    # --- 5. 组装 JSON ---
     if "AuditData" not in final_json: final_json["AuditData"] = {}
     
     final_json["AuditData"].update({
@@ -101,7 +104,7 @@ def generate_json_logic(excel_file, template_data):
         "AuditTeam": [{
             "Name": auditor_name,
             "CaaNo": caa_no,
-            "AuditorId": auditor_id,        # 现在可以完整提取带空格的 ID
+            "AuditorId": auditor_id,        # 映射至 AuditorId
             "AuditDaysPerformed": 1.5,
             "DatesOnSite": [
                 {"Date": start_iso, "Day": 1}, 
@@ -111,7 +114,6 @@ def generate_json_logic(excel_file, template_data):
         }]
     })
 
-    # 其他组织信息
     if "OrganizationInformation" not in final_json: final_json["OrganizationInformation"] = {}
     final_json["OrganizationInformation"].update({
         "OrganizationName": find_val_by_key(db_df, ["组织名称"]),
@@ -120,7 +122,6 @@ def generate_json_logic(excel_file, template_data):
         "CertificateScope": find_val_by_key(db_df, ["证书范围"])
     })
 
-    # 过程清单
     processes = []
     if not proc_df.empty:
         clause_cols = proc_df.columns[13:] if proc_df.shape[1] > 13 else []
@@ -148,8 +149,8 @@ def generate_json_logic(excel_file, template_data):
     return final_json
 
 # --- Streamlit UI ---
-st.title("🛡️ 审计数据转换工具")
-st.caption("v9.6 | 修正: IATF ID 支持带空格的完整字符串 (修复 GZH 问题)")
+st.title("🛡️ 审计数据转换工具 (v9.9)")
+st.caption("已优化：从『信息』子表精准提取 IATF ID | 姓名重排 | CCAA 多编号")
 
 uploaded_files = st.file_uploader("上传 Excel 文件", type=["xlsx"], accept_multiple_files=True)
 
@@ -179,6 +180,7 @@ IATF ID: {team['AuditorId']}
             st.divider()
         except Exception as e:
             st.error(f"❌ 处理失败: {e}")
+
 
 
 
