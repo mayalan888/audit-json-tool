@@ -3,14 +3,15 @@ import pandas as pd
 import json
 import uuid
 import time
+import os  # <--- 之前缺少的关键库，现在加上了
 import copy
 import re
 from datetime import datetime, timedelta
 
 # --- 页面配置 ---
 st.set_page_config(
-    page_title="IATF 审计数据转换工具 (智能修复版)",
-    page_icon="🔍",
+    page_title="IATF 审计数据转换工具 (最终修复版)",
+    page_icon="🛠️",
     layout="wide"
 )
 
@@ -73,15 +74,13 @@ def generate_json_logic(excel_file, template_data):
     # (A) 姓名 Name
     # 优先找 "姓名"，如果找不到找 "Name"
     auditor_name = find_val_by_key(db_df, ["姓名", "Auditor Name"])
-    # 如果名字里混入了英文 (比如 "Zhang San")，尝试把中文去掉，只留英文名(可选)
-    # 这里保持原样或做简单清洗
     if auditor_name:
         # 去掉可能存在的 "Name:" 前缀
         auditor_name = auditor_name.replace("Name:", "").replace("姓名:", "").strip()
 
     # (B) CCAA 编号 (CaaNo)
     # 在数据库表中找 "审核员CCAA" 或 "CCAA"
-    ccaa_raw = find_val_by_key(db_df, ["审核员CCAA", "CCAA-编号"])
+    ccaa_raw = find_val_by_key(db_df, ["审核员CCAA", "CCAA-编号", "CCAA"])
     caa_no = ""
     if ccaa_raw:
         # 正则提取 CCAA: 后面的内容 (兼容中英文冒号)
@@ -89,13 +88,13 @@ def generate_json_logic(excel_file, template_data):
         if match:
             caa_no = match.group(1)
         else:
-            # 如果没有 CCAA: 前缀，可能整个单元格就是编号
-            caa_no = ccaa_raw
+            # 如果没有 CCAA: 前缀，尝试直接提取数字
+             caa_no = ccaa_raw
 
     # (C) IATF 编号 (AuditorId)
     # 在信息表中找 "IATF Card"
-    iatf_raw = find_val_by_key(info_df, ["IATF Card", "IATF卡号"])
-    auditor_id = "" # 默认空
+    iatf_raw = find_val_by_key(info_df, ["IATF Card", "IATF卡号", "IATF"])
+    auditor_id = "" 
     if iatf_raw:
         # 正则提取 IATF: 后面的内容
         match = re.search(r'IATF[:：]\s*([0-9-]+)', iatf_raw)
@@ -103,24 +102,23 @@ def generate_json_logic(excel_file, template_data):
             auditor_id = match.group(1)
     
     # 如果信息表没找到，尝试在数据库表的 CCAA 那个格子里找 (有时候写在一起)
-    if not auditor_id and "IATF" in ccaa_raw:
+    if not auditor_id and ccaa_raw and "IATF" in ccaa_raw:
         match = re.search(r'IATF[:：-]?\s*([0-9-]+)', ccaa_raw)
         if match:
             auditor_id = match.group(1)
-    
-    # 兜底：如果还是没找到，给一个默认占位符，防止报错
-    if not auditor_id:
-        auditor_id = "UNKNOWN-ID"
+            
+    # 如果还是没找到，给个默认值
+    if not auditor_id: auditor_id = "UNKNOWN"
 
-    # (D) 其他基础信息 (尝试智能搜索，失败则回退到固定坐标)
-    report_name = find_val_by_key(db_df, ["报告名称"]) or str(db_df.iloc[1, 1]) if db_df.shape[0]>1 else ""
-    org_name = find_val_by_key(db_df, ["组织名称"]) or str(db_df.iloc[1, 4]) if db_df.shape[0]>1 else ""
+    # (D) 其他基础信息
+    report_name = find_val_by_key(db_df, ["报告名称"]) or (str(db_df.iloc[1, 1]) if db_df.shape[0]>1 else "")
+    org_name = find_val_by_key(db_df, ["组织名称"]) or (str(db_df.iloc[1, 4]) if db_df.shape[0]>1 else "")
     
-    start_date_raw = find_val_by_key(db_df, ["审核开始时间"]) or str(db_df.iloc[2, 1]) if db_df.shape[0]>2 else ""
-    end_date_raw = find_val_by_key(db_df, ["审核结束时间"]) or str(db_df.iloc[3, 1]) if db_df.shape[0]>3 else ""
+    start_date_raw = find_val_by_key(db_df, ["审核开始时间"]) or (str(db_df.iloc[2, 1]) if db_df.shape[0]>2 else "")
+    end_date_raw = find_val_by_key(db_df, ["审核结束时间"]) or (str(db_df.iloc[3, 1]) if db_df.shape[0]>3 else "")
     
-    cb_id = find_val_by_key(db_df, ["认证机构识别号"]) or str(db_df.iloc[2, 4]) if db_df.shape[0]>2 else ""
-    usi_code = find_val_by_key(db_df, ["IATF USI"]) or str(db_df.iloc[3, 4]) if db_df.shape[0]>3 else ""
+    cb_id = find_val_by_key(db_df, ["认证机构识别号"]) or (str(db_df.iloc[2, 4]) if db_df.shape[0]>2 else "")
+    usi_code = find_val_by_key(db_df, ["IATF USI"]) or (str(db_df.iloc[3, 4]) if db_df.shape[0]>3 else "")
     
     total_employees = find_val_by_key(db_df, ["员工总数"])
     certificate_scope = find_val_by_key(db_df, ["证书范围"])
@@ -130,22 +128,18 @@ def generate_json_logic(excel_file, template_data):
     if supplier_code == "无": supplier_code = ""
 
     # (E) 地址处理
-    # 搜索包含 "地址" 的行
     zh_addr = ""
     en_addr = ""
     
-    # 简单的全表扫描找地址
     addr_candidates = []
     if not db_df.empty:
         for r in range(db_df.shape[0]):
             for c in range(db_df.shape[1]):
                 val = str(db_df.iloc[r, c])
                 if "地址" in val or "Address" in val:
-                    # 收集这一行所有可能的地址文本
                     if c+1 < db_df.shape[1]: addr_candidates.append(str(db_df.iloc[r, c+1]))
                     if c+4 < db_df.shape[1]: addr_candidates.append(str(db_df.iloc[r, c+4]))
 
-    # 区分中英文地址
     for cand in addr_candidates:
         if not cand or cand.lower() == 'nan': continue
         if re.search(r'[\u4e00-\u9fff]', cand):
@@ -168,44 +162,40 @@ def generate_json_logic(excel_file, template_data):
     # --- 3. 组装 JSON ---
     if "AuditData" not in final_json: final_json["AuditData"] = {}
     
-    # 填充 AuditTeam
     final_json["AuditData"].update({
         "AuditDate": {"Start": start_iso, "End": end_iso},
         "ReportName": report_name,
         "CbIdentificationNo": cb_id,
         "AuditTeam": [{
-            "Name": auditor_name,      # 修复：现在是真正的姓名
-            "CaaNo": caa_no,           # 修复：正则提取后的纯数字
-            "AuditorId": auditor_id,   # 修复：正则提取后的纯数字
+            "Name": auditor_name,
+            "CaaNo": caa_no,
+            "AuditorId": auditor_id,
             "AuditDaysPerformed": 1.5,
             "DatesOnSite": [{"Date": start_iso, "Day": 1}, {"Date": end_iso, "Day": 0.5}],
             "PlanningTime": "0.0000"
         }]
     })
 
-    # Organization Info
     if "OrganizationInformation" not in final_json: final_json["OrganizationInformation"] = {}
     final_json["OrganizationInformation"].update({
         "OrganizationName": org_name,
         "AddressNative": {"Street1": zh_addr, "PostalCode": "", "Country": "中国"},
-        "Address": {"Street1": en_addr, "City": "", "Country": "China"}, # 简易填充
+        "Address": {"Street1": en_addr, "City": "", "Country": "China"},
         "IATF_USI": usi_code,
         "CertificateScope": certificate_scope,
         "TotalNumberEmployees": total_employees
     })
 
-    # Customer Info
     if "CustomerInformation" not in final_json: final_json["CustomerInformation"] = {}
     final_json["CustomerInformation"]["Customers"] = [{
         "Id": str(int(time.time() * 1000)),
         "Name": customer_name,
         "SupplierCode": supplier_code,
-        "Csrs": [] # 简化处理，如有 CSR 可在此添加逻辑
+        "Csrs": []
     }]
 
     # 4. 过程清单 (Processes)
     processes = []
-    # 假设从第13列开始是条款 (Index 13)
     clause_cols = proc_df.columns[13:] if not proc_df.empty and proc_df.shape[1] > 13 else []
     
     if not proc_df.empty:
@@ -230,15 +220,14 @@ def generate_json_logic(excel_file, template_data):
     final_json["uuid"] = str(uuid.uuid4())
     final_json["created"] = int(time.time() * 1000)
 
-    # 结果日期
     if "Results" not in final_json: final_json["Results"] = {}
     final_json["Results"]["AuditReportFinal"] = {"Date": end_iso}
     
     return final_json
 
 # --- 界面 ---
-st.title("🔎 智能审计转换工具 v9.1")
-st.caption("已启用智能搜索模式：自动定位姓名、CCAA编号及IATF卡号")
+st.title("🔎 智能审计转换工具 (最终修复版)")
+st.caption("版本: v9.2 | 修复: NameError 'os' missing")
 
 uploaded_files = st.file_uploader("请上传 Excel 文件", type=["xlsx"], accept_multiple_files=True)
 
@@ -249,23 +238,23 @@ if uploaded_files:
         with open('金磁.json', 'r', encoding='utf-8') as f:
             template = json.load(f)
     else:
-        st.warning("⚠️ 未找到 '金磁.json' 模板，将使用空对象生成，可能导致部分字段缺失。")
+        st.warning("⚠️ 未检测到 '金磁.json'，将使用空模板生成（部分字段可能为空）。请确保该文件在 GitHub 根目录。")
 
     for file in uploaded_files:
         try:
             res_json = generate_json_logic(file, template)
             
-            # 预览关键提取结果，方便核对
+            # 预览关键提取结果
             team = res_json.get("AuditData", {}).get("AuditTeam", [{}])[0]
             st.success(f"✅ {file.name} 处理完成")
-            st.markdown(f"""
-            - **提取姓名**: `{team.get('Name')}`
-            - **CCAA编号**: `{team.get('CaaNo')}`
-            - **IATF卡号**: `{team.get('AuditorId')}`
-            """)
+            st.code(f"""
+            姓名: {team.get('Name')}
+            CCAA: {team.get('CaaNo')}
+            IATF: {team.get('AuditorId')}
+            """, language="yaml")
             
             st.download_button(
-                label=f"📥 下载 JSON ({file.name})",
+                label=f"📥 下载 {file.name.replace('.xlsx', '.json')}",
                 data=json.dumps(res_json, indent=2, ensure_ascii=False),
                 file_name=file.name.replace(".xlsx", ".json")
             )
@@ -273,6 +262,7 @@ if uploaded_files:
             
         except Exception as e:
             st.error(f"❌ {file.name} 失败: {e}")
+
 
 
 
