@@ -10,13 +10,14 @@ from datetime import datetime, timedelta
 
 # --- 页面配置 ---
 st.set_page_config(
-    page_title="IATF 审计转换工具 (v13.0)",
-    page_icon="🛡️",
+    page_title="IATF 审计转换工具 (v14.0)",
+    page_icon="📋",
     layout="wide"
 )
 
-# --- 核心逻辑 ---
+# --- 核心转换逻辑 ---
 def generate_json_logic(excel_file, template_data):
+    # 使用传入的 template_data 进行深拷贝，确保支持任何模板结构
     final_json = copy.deepcopy(template_data)
     
     try:
@@ -51,35 +52,28 @@ def generate_json_logic(excel_file, template_data):
         else:
             auditor_name = english_part
 
-    # --- 2. CCAA 编号 ---
+    # --- 2. CCAA 编号 (支持多编号) ---
     ccaa_raw = find_val_by_key(db_df, ["审核员CCAA", "CCAA"])
     caa_no = ""
     if ccaa_raw:
         match = re.search(r'(?:CCAA[:：\s-])\s*(.*)', ccaa_raw, re.IGNORECASE | re.DOTALL)
         caa_no = match.group(1).strip() if match else ccaa_raw.strip()
 
-    # --- 3. IATF ID (AuditorId) 终极修复逻辑 ---
+    # --- 3. IATF ID (AuditorId) 精准提取 ---
     auditor_id = ""
     if not info_df.empty:
         for r in range(info_df.shape[0]):
             for c in range(info_df.shape[1]):
                 cell_text = str(info_df.iloc[r, c])
-                # 寻找包含 "IATF Card" 的格子
                 if "IATF Card" in cell_text:
-                    # 强制锁定右边那个单元格
                     if c + 1 < info_df.shape[1]:
                         raw_val = str(info_df.iloc[r, c + 1]).strip()
-                        # A. 替换所有换行符为空格，防止截断
                         raw_val = raw_val.replace('\n', ' ').replace('\r', ' ')
-                        # B. 精准剔除 "IATF:" 前缀
-                        # 匹配字符串开头的 IATF 以及随后的冒号/空格，并将其替换为空
                         auditor_id = re.sub(r'^IATF[:：\s-]*', '', raw_val, flags=re.IGNORECASE).strip()
-                        # 如果提取结果太短（比如只有 GZH），说明可能找错行了，继续搜寻
-                        if len(auditor_id) > 4: 
-                            break
+                        if len(auditor_id) > 4: break
             if auditor_id and len(auditor_id) > 4: break
 
-    # --- 4. 组装 JSON ---
+    # --- 4. 日期处理 ---
     start_date_raw = find_val_by_key(db_df, ["审核开始时间"])
     end_date_raw = find_val_by_key(db_df, ["审核结束时间"])
     def fmt_iso(val):
@@ -90,21 +84,24 @@ def generate_json_logic(excel_file, template_data):
         return ""
     start_iso, end_iso = fmt_iso(start_date_raw), fmt_iso(end_date_raw)
 
+    # --- 5. 映射数据到模板 ---
     if "AuditData" not in final_json: final_json["AuditData"] = {}
+    
+    # 填充团队信息
     final_json["AuditData"].update({
         "AuditDate": {"Start": start_iso, "End": end_iso},
         "CbIdentificationNo": find_val_by_key(db_df, ["认证机构识别号"]),
         "AuditTeam": [{
             "Name": auditor_name,
             "CaaNo": caa_no,
-            "AuditorId": auditor_id,        # 映射最终纯净编号
+            "AuditorId": auditor_id,
             "AuditDaysPerformed": 1.5,
             "DatesOnSite": [{"Date": start_iso, "Day": 1}, {"Date": end_iso, "Day": 0.5}],
             "PlanningTime": "0.0000"
         }]
     })
 
-    # 填充其他信息
+    # 填充组织信息
     if "OrganizationInformation" not in final_json: final_json["OrganizationInformation"] = {}
     final_json["OrganizationInformation"].update({
         "OrganizationName": find_val_by_key(db_df, ["组织名称"]),
@@ -113,7 +110,7 @@ def generate_json_logic(excel_file, template_data):
         "CertificateScope": find_val_by_key(db_df, ["证书范围"])
     })
 
-    # 过程清单逻辑 (引用 AuditorId)
+    # 填充过程清单
     processes = []
     if not proc_df.empty:
         clause_cols = proc_df.columns[13:] if proc_df.shape[1] > 13 else []
@@ -132,33 +129,67 @@ def generate_json_logic(excel_file, template_data):
 
     final_json["Processes"] = processes
     final_json["uuid"], final_json["created"] = str(uuid.uuid4()), int(time.time() * 1000)
+    
+    # 结果日期同步
     if "Results" not in final_json: final_json["Results"] = {}
     final_json["Results"]["AuditReportFinal"] = {"Date": end_iso}
 
     return final_json
 
-# --- UI ---
-st.title("🛡️ 审计数据转换工具 (v13.0)")
-st.caption("修复：强制锁定『信息』表右侧单元格，解决 GZH 截断与识别偏移问题")
+# --- 侧边栏：模板管理 ---
+with st.sidebar:
+    st.header("⚙️ 模板管理")
+    st.info("默认使用 `金磁.json`。您可以上传其他 JSON 文件作为新模板。")
+    user_template_file = st.file_uploader("上传自定义模板 JSON", type=["json"])
+    
+    current_template_name = "金磁.json (默认)"
+    active_template = None
 
-uploaded_files = st.file_uploader("上传 Excel 文件", type=["xlsx"], accept_multiple_files=True)
+    if user_template_file:
+        try:
+            active_template = json.load(user_template_file)
+            current_template_name = user_template_file.name
+            st.success(f"已加载: {current_template_name}")
+        except Exception as e:
+            st.error(f"解析模板失败: {e}")
+    
+    if active_template is None:
+        if os.path.exists('金磁.json'):
+            with open('金磁.json', 'r', encoding='utf-8') as f:
+                active_template = json.load(f)
+        else:
+            st.error("未找到默认模板 `金磁.json`，请上传模板文件。")
+            st.stop()
+
+# --- 主界面 ---
+st.title("🚀 多模板审计转换工具 (v14.0)")
+st.write(f"当前生效模板：**{current_template_name}**")
+
+uploaded_files = st.file_uploader("上传 Excel 数据表 (可多选)", type=["xlsx"], accept_multiple_files=True)
 
 if uploaded_files:
-    template = {}
-    if os.path.exists('金磁.json'):
-        with open('金磁.json', 'r', encoding='utf-8') as f:
-            template = json.load(f)
-
-    for file in uploaded_files:
+    st.divider()
+    for excel_file in uploaded_files:
         try:
-            res_json = generate_json_logic(file, template)
+            # 使用当前激活的模板进行处理
+            res_json = generate_json_logic(excel_file, active_template)
             team = res_json["AuditData"]["AuditTeam"][0]
-            st.success(f"✅ {file.name} 转换成功")
-            st.code(f"姓名: {team['Name']}\nCCAA: {team['CaaNo']}\nIATF ID: {team['AuditorId']}", language="yaml")
-            st.download_button(label=f"📥 下载 JSON", data=json.dumps(res_json, indent=2, ensure_ascii=False), file_name=file.name.replace(".xlsx", ".json"))
-            st.divider()
+            
+            with st.expander(f"📄 {excel_file.name} - 处理结果", expanded=True):
+                col1, col2 = st.columns([3, 1])
+                with col1:
+                    st.success(f"转换成功！")
+                    st.text(f"姓名: {team['Name']} | CCAA: {team['CaaNo'][:20]}... | IATF ID: {team['AuditorId']}")
+                with col2:
+                    st.download_button(
+                        label="📥 下载 JSON",
+                        data=json.dumps(res_json, indent=2, ensure_ascii=False),
+                        file_name=excel_file.name.replace(".xlsx", ".json"),
+                        key=f"dl_{excel_file.name}"
+                    )
         except Exception as e:
-            st.error(f"❌ 处理失败: {e}")
+            st.error(f"❌ {excel_file.name} 处理失败: {e}")
+
 
 
 
