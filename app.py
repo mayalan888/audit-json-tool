@@ -189,15 +189,3 @@ if uploaded_files:
                     )
         except Exception as e:
             st.error(f"❌ {excel_file.name} 处理失败: {e}")
-
-
-
-
-
-
-
-
-
-
-
-
