@@ -10,7 +10,7 @@ from datetime import datetime, timedelta
 
 # --- 页面配置 ---
 st.set_page_config(
-    page_title="IATF 审计转换工具 (v30.0)",
+    page_title="IATF 审计转换工具 (v31.0)",
     page_icon="🛡️",
     layout="wide"
 )
@@ -88,7 +88,7 @@ def generate_json_logic(excel_file, template_data):
         match = re.search(r'(?:CCAA[:：\s-])\s*(.*)', ccaa_raw, re.IGNORECASE | re.DOTALL)
         caa_no = match.group(1).strip() if match else ccaa_raw.strip()
 
-    # 💥 [AuditorId 还原为早期最稳定的提取逻辑]
+    # [AuditorId 稳定版提取逻辑]
     auditor_id = ""
     if not info_df.empty:
         for r in range(info_df.shape[0]):
@@ -119,11 +119,16 @@ def generate_json_logic(excel_file, template_data):
         if pd.notna(end_dt): next_audit_iso = (end_dt + timedelta(days=45)).strftime('%Y-%m-%d') + "T00:00:00.000Z"
     except: pass
 
-    # 💥 [英文地址：剥离换行符 + 倒序切分 完美融合]
+    # [顾客与 CSR 提取] (恢复)
+    customer_name = find_val_by_key(db_df, ["顾客", "客户名称"])
+    supplier_code = find_val_by_key(db_df, ["供应商编码", "供应商代码"])
+    csr_name = find_val_by_key(db_df, ["CSR文件名称"])
+    csr_date = fmt_iso(find_val_by_key(db_df, ["CSR文件日期"]))
+
+    # [英文地址：剥离换行符 + 倒序切分]
     native_street = ""
     english_address = ""
 
-    # 直接在“信息”表中寻找审核地址
     if not info_df.empty:
         for r in range(info_df.shape[0]):
             for c in range(info_df.shape[1]):
@@ -132,22 +137,18 @@ def generate_json_logic(excel_file, template_data):
                     if c + 1 < info_df.shape[1]:
                         rv = str(info_df.iloc[r, c+1]).strip()
                         if rv and rv.lower() != 'nan':
-                            # 1. 拆分换行符，中英文精准分离
                             lines = rv.replace('\r', '\n').split('\n')
                             en_lines = [l.strip() for l in lines if not re.search(r'[\u4e00-\u9fff]', l) and l.strip()]
                             zh_lines = [l.strip() for l in lines if re.search(r'[\u4e00-\u9fff]', l) and l.strip()]
-                            
                             if en_lines: english_address = " ".join(en_lines)
                             if zh_lines: native_street = " ".join(zh_lines)
                         break
             if english_address: break
 
-    # 2. 纯英文地址倒序切分逻辑
     street, city, state, country = english_address, "", "", ""
     if english_address:
         clean_eng = english_address.replace('，', ',')
         parts = [p.strip() for p in clean_eng.split(',') if p.strip()]
-        
         if len(parts) >= 3:
             country = parts[-1]
             state = parts[-2]
@@ -172,20 +173,21 @@ def generate_json_logic(excel_file, template_data):
         team.update({
             "Name": auditor_name,
             "CaaNo": caa_no,
-            "AuditorId": auditor_id,  # 已经恢复为稳定的取值
+            "AuditorId": auditor_id, 
             "AuditDaysPerformed": 1.5,
             "DatesOnSite": [{"Date": start_iso, "Day": 1}, {"Date": end_iso, "Day": 0.5}]
         })
 
-    # B. 组织与地址信息
+    # B. 组织与地址信息 💥(恢复误删的 OrganizationName, IndustryCode, IATF_USI 等)
     ensure_path(final_json, ["OrganizationInformation", "AddressNative"])
     ensure_path(final_json, ["OrganizationInformation", "Address"])
     org = final_json["OrganizationInformation"]
     
-    org.update({
-        "TotalNumberEmployees": find_val_by_key(db_df, ["包括扩展现场在内的员工总数", "员工总数"]),
-        "CertificateScope": find_val_by_key(db_df, ["证书范围"])
-    })
+    org["OrganizationName"] = find_val_by_key(db_df, ["组织名称"])
+    org["IndustryCode"] = find_val_by_key(db_df, ["行业代码", "Industry Code"])
+    org["IATF_USI"] = find_val_by_key(db_df, ["IATF USI", "USI"])
+    org["TotalNumberEmployees"] = find_val_by_key(db_df, ["包括扩展现场在内的员工总数", "员工总数"])
+    org["CertificateScope"] = find_val_by_key(db_df, ["证书范围"])
     
     org["AddressNative"].update({
         "Street1": native_street,
@@ -201,7 +203,56 @@ def generate_json_logic(excel_file, template_data):
         "PostalCode": find_val_by_key(db_df, ["邮政编码"])
     })
 
-    # C. 过程清单重建
+    # C. 顾客与 CSR 定点替换 💥(恢复误删)
+    ensure_path(final_json, ["CustomerInformation"])
+    if "Customers" not in final_json["CustomerInformation"] or not isinstance(final_json["CustomerInformation"]["Customers"], list):
+        final_json["CustomerInformation"]["Customers"] = [{}]
+    elif len(final_json["CustomerInformation"]["Customers"]) == 0:
+        final_json["CustomerInformation"]["Customers"].append({})
+        
+    cust = final_json["CustomerInformation"]["Customers"][0]
+    if "Id" not in cust: cust["Id"] = str(uuid.uuid4())
+    if customer_name: cust["Name"] = customer_name
+    if supplier_code: cust["SupplierCode"] = supplier_code
+    
+    if "Csrs" not in cust or not isinstance(cust["Csrs"], list):
+        cust["Csrs"] = [{}]
+    elif len(cust["Csrs"]) == 0:
+        cust["Csrs"].append({})
+        
+    csr = cust["Csrs"][0]
+    if customer_name: csr["Name"] = customer_name
+    if supplier_code: csr["SupplierCode"] = supplier_code
+    if csr_name: csr["NameCSRDocument"] = csr_name
+    if csr_date: csr["DateCSRDocument"] = csr_date
+
+    # D. 文件清单定点替换 💥(恢复误删的第九张表逻辑)
+    docs_list = []
+    if not doc_list_df.empty:
+        for c in range(doc_list_df.shape[1]):
+            for r in range(doc_list_df.shape[0]):
+                cell_val = str(doc_list_df.iloc[r, c]).strip()
+                if "公司内对应的程序文件" in cell_val or "包含名称、编号、版本" in cell_val:
+                    for r2 in range(r + 1, doc_list_df.shape[0]):
+                        val = str(doc_list_df.iloc[r2, c]).strip()
+                        if val and val.lower() != 'nan':
+                            docs_list.append(val)
+                    break
+            if docs_list: break
+
+    if docs_list:
+        ensure_path(final_json, ["Stage1DocumentedRequirements"])
+        if "IatfClauseDocuments" not in final_json["Stage1DocumentedRequirements"] or not isinstance(final_json["Stage1DocumentedRequirements"]["IatfClauseDocuments"], list):
+            final_json["Stage1DocumentedRequirements"]["IatfClauseDocuments"] = []
+            
+        clause_docs = final_json["Stage1DocumentedRequirements"]["IatfClauseDocuments"]
+        for i, doc_name in enumerate(docs_list):
+            if i < len(clause_docs):
+                clause_docs[i]["DocumentName"] = doc_name
+            else:
+                clause_docs.append({"DocumentName": doc_name})
+
+    # E. 过程清单重建
     processes = []
     if not proc_df.empty:
         clause_cols = proc_df.columns[13:] if proc_df.shape[1] > 13 else []
@@ -224,7 +275,7 @@ def generate_json_logic(excel_file, template_data):
             processes.append(proc_obj)
     final_json["Processes"] = processes
 
-    # D. 结果日期
+    # F. 结果日期
     ensure_path(final_json, ["Results", "AuditReportFinal"])
     final_json["Results"]["AuditReportFinal"]["Date"] = end_iso
     final_json["Results"]["DateNextScheduledAudit"] = next_audit_iso
@@ -232,7 +283,7 @@ def generate_json_logic(excel_file, template_data):
     return final_json
 
 # ================= 主界面 =================
-st.title("🛡️ 多模板审计转换引擎 (v30.0 稳定版)")
+st.title("🛡️ 多模板审计转换引擎 (v31.0 终极全量版)")
 st.write(f"当前生效模板：**{template_name}**")
 
 uploaded_files = st.file_uploader("📥 上传 Excel 数据表", type=["xlsx"], accept_multiple_files=True)
@@ -243,17 +294,22 @@ if uploaded_files:
         try:
             res_json = generate_json_logic(file, active_template)
             team = res_json["AuditData"]["AuditTeam"][0]
+            org = res_json["OrganizationInformation"]
+            
             st.success(f"✅ {file.name} 转换成功")
             
+            # 增加 OrganizationName 和 IndustryCode 的预览！
             with st.expander("👀 查看关键字段提取预览", expanded=True):
                  st.code(f"""
-AuditorId: {team.get('AuditorId', '')}
+Organization: {org.get('OrganizationName', '')}
+IndustryCode: {org.get('IndustryCode', '')}
+AuditorId:    {team.get('AuditorId', '')}
 -------------------------
 【Address 切分结果】
-State:   {res_json['OrganizationInformation']['Address'].get('State', '')}
-City:    {res_json['OrganizationInformation']['Address'].get('City', '')}
-Country: {res_json['OrganizationInformation']['Address'].get('Country', '')}
-Street1: {res_json['OrganizationInformation']['Address'].get('Street1', '')}
+State:   {org['Address'].get('State', '')}
+City:    {org['Address'].get('City', '')}
+Country: {org['Address'].get('Country', '')}
+Street1: {org['Address'].get('Street1', '')}
                  """.strip(), language="yaml")
                  
             st.download_button(
@@ -264,3 +320,4 @@ Street1: {res_json['OrganizationInformation']['Address'].get('Street1', '')}
             )
         except Exception as e:
             st.error(f"❌ {file.name} 处理失败: {str(e)}")
+
