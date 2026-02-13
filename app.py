@@ -10,7 +10,7 @@ from datetime import datetime, timedelta
 
 # --- 页面配置 ---
 st.set_page_config(
-    page_title="IATF 审计转换工具 (v31.0)",
+    page_title="IATF 审计转换工具 (v32.0)",
     page_icon="🛡️",
     layout="wide"
 )
@@ -119,7 +119,7 @@ def generate_json_logic(excel_file, template_data):
         if pd.notna(end_dt): next_audit_iso = (end_dt + timedelta(days=45)).strftime('%Y-%m-%d') + "T00:00:00.000Z"
     except: pass
 
-    # [顾客与 CSR 提取] (恢复)
+    # [顾客与 CSR 提取]
     customer_name = find_val_by_key(db_df, ["顾客", "客户名称"])
     supplier_code = find_val_by_key(db_df, ["供应商编码", "供应商代码"])
     csr_name = find_val_by_key(db_df, ["CSR文件名称"])
@@ -178,7 +178,7 @@ def generate_json_logic(excel_file, template_data):
             "DatesOnSite": [{"Date": start_iso, "Day": 1}, {"Date": end_iso, "Day": 0.5}]
         })
 
-    # B. 组织与地址信息 💥(恢复误删的 OrganizationName, IndustryCode, IATF_USI 等)
+    # B. 组织与地址信息 💥(恢复误删的所有联系人信息及基础信息)
     ensure_path(final_json, ["OrganizationInformation", "AddressNative"])
     ensure_path(final_json, ["OrganizationInformation", "Address"])
     org = final_json["OrganizationInformation"]
@@ -188,6 +188,14 @@ def generate_json_logic(excel_file, template_data):
     org["IATF_USI"] = find_val_by_key(db_df, ["IATF USI", "USI"])
     org["TotalNumberEmployees"] = find_val_by_key(db_df, ["包括扩展现场在内的员工总数", "员工总数"])
     org["CertificateScope"] = find_val_by_key(db_df, ["证书范围"])
+    
+    # 【新增补齐】：联系人信息
+    org["Representative"] = find_val_by_key(db_df, ["管理者代表", "联系人", "Representative"])
+    org["Telephone"] = find_val_by_key(db_df, ["联系电话", "电话", "Telephone"])
+    
+    # 邮箱特殊处理逻辑：如果提取到 "0" 则置空
+    extracted_email = find_val_by_key(db_df, ["电子邮箱", "邮箱", "Email", "E-mail"])
+    org["Email"] = "" if extracted_email == "0" else extracted_email
     
     org["AddressNative"].update({
         "Street1": native_street,
@@ -203,7 +211,7 @@ def generate_json_logic(excel_file, template_data):
         "PostalCode": find_val_by_key(db_df, ["邮政编码"])
     })
 
-    # C. 顾客与 CSR 定点替换 💥(恢复误删)
+    # C. 顾客与 CSR 定点替换
     ensure_path(final_json, ["CustomerInformation"])
     if "Customers" not in final_json["CustomerInformation"] or not isinstance(final_json["CustomerInformation"]["Customers"], list):
         final_json["CustomerInformation"]["Customers"] = [{}]
@@ -226,7 +234,7 @@ def generate_json_logic(excel_file, template_data):
     if csr_name: csr["NameCSRDocument"] = csr_name
     if csr_date: csr["DateCSRDocument"] = csr_date
 
-    # D. 文件清单定点替换 💥(恢复误删的第九张表逻辑)
+    # D. 文件清单定点替换
     docs_list = []
     if not doc_list_df.empty:
         for c in range(doc_list_df.shape[1]):
@@ -283,7 +291,7 @@ def generate_json_logic(excel_file, template_data):
     return final_json
 
 # ================= 主界面 =================
-st.title("🛡️ 多模板审计转换引擎 (v31.0 终极全量版)")
+st.title("🛡️ 多模板审计转换引擎 (v32.0 终极全量版)")
 st.write(f"当前生效模板：**{template_name}**")
 
 uploaded_files = st.file_uploader("📥 上传 Excel 数据表", type=["xlsx"], accept_multiple_files=True)
@@ -298,12 +306,17 @@ if uploaded_files:
             
             st.success(f"✅ {file.name} 转换成功")
             
-            # 增加 OrganizationName 和 IndustryCode 的预览！
+            # 更新预览面板，将联系人信息展示出来
             with st.expander("👀 查看关键字段提取预览", expanded=True):
                  st.code(f"""
 Organization: {org.get('OrganizationName', '')}
 IndustryCode: {org.get('IndustryCode', '')}
 AuditorId:    {team.get('AuditorId', '')}
+-------------------------
+【联系人信息】
+Representative: {org.get('Representative', '')}
+Telephone:      {org.get('Telephone', '')}
+Email:          {org.get('Email', '')}
 -------------------------
 【Address 切分结果】
 State:   {org['Address'].get('State', '')}
@@ -320,4 +333,5 @@ Street1: {org['Address'].get('Street1', '')}
             )
         except Exception as e:
             st.error(f"❌ {file.name} 处理失败: {str(e)}")
+
 
