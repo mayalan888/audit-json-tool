@@ -8,7 +8,7 @@ import copy
 import re
 from datetime import datetime, timedelta
 
-st.set_page_config(page_title="IATF 审计转换工具 (v23.0)", page_icon="🎯", layout="wide")
+st.set_page_config(page_title="IATF 审计转换工具 (v24.0)", page_icon="🎯", layout="wide")
 
 # ================= UI：强制要求上传模板 =================
 with st.sidebar:
@@ -132,7 +132,6 @@ def generate_json_logic(excel_file, template_data):
     csr_name = find_val_by_key(db_df, ["CSR文件名称"])
     csr_date = fmt_iso(find_val_by_key(db_df, ["CSR文件日期"]))
 
-    # 中文地址提取
     zh_addr = ""
     addr_candidates = []
     if not db_df.empty:
@@ -146,39 +145,50 @@ def generate_json_logic(excel_file, template_data):
         if cand and cand.lower() != 'nan' and re.search(r'[\u4e00-\u9fff]', cand):
             if len(cand) > len(zh_addr): zh_addr = cand
 
-    # 💥 (D) 英文地址全局智能搜寻与断行修复
+    # 💥 (D) 英文地址终极断行缝合与深度提取
     en_state, en_city, en_country, en_street1 = "", "", "", ""
     en_addr_raw = ""
     
-    # 扫描全表，锁定包含 PROVINCE/CITY 和 CHINA 的格子（这才是真正的英文地址）
-    for df in [info_df, db_df]:
-        if df.empty: continue
-        for r in range(df.shape[0]):
-            for c in range(df.shape[1]):
-                val = str(df.iloc[r, c]).strip()
-                val_upper = val.upper()
-                if ("PROVINCE" in val_upper or "CITY" in val_upper) and "CHINA" in val_upper:
-                    en_addr_raw = val
-                    break
+    if not info_df.empty:
+        for r in range(info_df.shape[0]):
+            for c in range(info_df.shape[1]):
+                val = str(info_df.iloc[r, c]).strip()
+                if "审核地址" in val or "Address" in val:
+                    # 1. 尝试在当前格子内提取（如果中英文都在同一个格子内）
+                    after_label = re.sub(r'^.*?审核地址[:：\s]*', '', val, flags=re.IGNORECASE)
+                    after_label = re.sub(r'^.*?Audit\s*Address[:：\s]*', '', after_label, flags=re.IGNORECASE)
+                    
+                    if re.search(r'[a-zA-Z]', after_label):
+                        en_addr_raw = after_label
+                        break
+                    
+                    # 2. 如果当前格子没有英文，向右侧连续找几个格子
+                    for offset in range(1, 4):
+                        if c + offset < info_df.shape[1]:
+                            right_val = str(info_df.iloc[r, c+offset]).strip()
+                            if re.search(r'[a-zA-Z]', right_val):
+                                en_addr_raw = right_val
+                                break
+                    if en_addr_raw: break
             if en_addr_raw: break
-        if en_addr_raw: break
 
+    # 执行切分与解析
     if en_addr_raw:
-        # 1. 把换行符全替换为空格！让被切断的 "LOUDI" 和 "CITY" 重新连在一起
+        # ⚠️ 关键修复：强制将所有换行符替换为空格，把 LOUDI\nCITY 缝合为 LOUDI CITY
         clean_addr = en_addr_raw.replace('\n', ' ').replace('\r', ' ').replace('，', ',')
         
-        # 2. 按照逗号切割
+        # 按逗号切割
         parts = [p.strip() for p in clean_addr.split(',') if p.strip()]
         
-        # 3. 剔除所有中文字符并清洗多余空格
         en_parts = []
         for p in parts:
             if re.search(r'[a-zA-Z]', p):
+                # 智能剔除混入的中文字符，只保留纯英文
                 p_clean = re.sub(r'[\u4e00-\u9fff]', '', p).strip()
-                p_clean = re.sub(r'\s+', ' ', p_clean) # 把多个连在一起的空格变成一个
+                p_clean = re.sub(r'\s+', ' ', p_clean) # 压缩多余的空格
                 if p_clean:
                     en_parts.append(p_clean)
-
+        
         if en_parts:
             # 最后一个必为 Country
             en_country = en_parts.pop(-1)
@@ -186,12 +196,13 @@ def generate_json_logic(excel_file, template_data):
             street_parts = []
             for p in en_parts:
                 p_upper = p.upper()
-                if "PROVINCE" in p_upper:
+                # 精准匹配 PROVINCE 或 CITY
+                if "PROVINCE" in p_upper or "STATE" in p_upper:
                     en_state = p
                 elif "CITY" in p_upper:
                     en_city = p
                 else:
-                    # 剩下的全归 Street1
+                    # 剩下的残余段落全部归属给 Street1
                     street_parts.append(p)
             
             en_street1 = ", ".join(street_parts)
@@ -203,9 +214,11 @@ def generate_json_logic(excel_file, template_data):
 
     # A. 审核基础信息定点替换
     ensure_path(final_json, ["AuditData", "AuditDate"])
-    final_json["AuditData"]["AuditDate"]["Start"] = start_iso
-    final_json["AuditData"]["AuditDate"]["End"] = end_iso
-    final_json["AuditData"]["CbIdentificationNo"] = find_val_by_key(db_df, ["认证机构标识号", "认证机构识别号"])
+    if start_iso: final_json["AuditData"]["AuditDate"]["Start"] = start_iso
+    if end_iso: final_json["AuditData"]["AuditDate"]["End"] = end_iso
+    
+    cb_id = find_val_by_key(db_df, ["认证机构标识号", "认证机构识别号"])
+    if cb_id: final_json["AuditData"]["CbIdentificationNo"] = cb_id
 
     if "AuditTeam" not in final_json["AuditData"] or not isinstance(final_json["AuditData"]["AuditTeam"], list):
         final_json["AuditData"]["AuditTeam"] = [{}]
@@ -213,9 +226,9 @@ def generate_json_logic(excel_file, template_data):
         final_json["AuditData"]["AuditTeam"].append({})
         
     team = final_json["AuditData"]["AuditTeam"][0]
-    team["Name"] = auditor_name
-    team["CaaNo"] = caa_no
-    team["AuditorId"] = auditor_id
+    if auditor_name: team["Name"] = auditor_name
+    if caa_no: team["CaaNo"] = caa_no
+    if auditor_id: team["AuditorId"] = auditor_id
     team["AuditDaysPerformed"] = 1.5
     team["DatesOnSite"] = [{"Date": start_iso, "Day": 1}, {"Date": end_iso, "Day": 0.5}]
 
@@ -223,21 +236,27 @@ def generate_json_logic(excel_file, template_data):
     ensure_path(final_json, ["OrganizationInformation", "AddressNative"])
     ensure_path(final_json, ["OrganizationInformation", "Address"])
     org = final_json["OrganizationInformation"]
-    org["OrganizationName"] = find_val_by_key(db_df, ["组织名称"])
-    org["IATF_USI"] = find_val_by_key(db_df, ["IATF USI"])
-    org["TotalNumberEmployees"] = total_employees
-    org["CertificateScope"] = certificate_scope
     
-    org["AddressNative"]["Street1"] = zh_addr
-    org["AddressNative"]["PostalCode"] = postal_code
+    org_name = find_val_by_key(db_df, ["组织名称"])
+    if org_name: org["OrganizationName"] = org_name
+    
+    usi = find_val_by_key(db_df, ["IATF USI"])
+    if usi: org["IATF_USI"] = usi
+    
+    if total_employees: org["TotalNumberEmployees"] = total_employees
+    if certificate_scope: org["CertificateScope"] = certificate_scope
+    
+    if zh_addr: org["AddressNative"]["Street1"] = zh_addr
+    if postal_code: 
+        org["AddressNative"]["PostalCode"] = postal_code
+        org["Address"]["PostalCode"] = postal_code # 同步赋值到英文地址
     org["AddressNative"]["Country"] = "中国"
     
-    # 精准填入切分好的纯英文地址，同步更新 PostalCode
-    org["Address"]["State"] = en_state
-    org["Address"]["City"] = en_city
-    org["Address"]["Country"] = en_country
-    org["Address"]["Street1"] = en_street1
-    org["Address"]["PostalCode"] = postal_code 
+    # ⚠️ 安全赋值：只有成功提取到了，才去更新模板
+    if en_state: org["Address"]["State"] = en_state
+    if en_city: org["Address"]["City"] = en_city
+    if en_country: org["Address"]["Country"] = en_country
+    if en_street1: org["Address"]["Street1"] = en_street1
 
     # C. 顾客与 CSR 定点替换
     ensure_path(final_json, ["CustomerInformation"])
@@ -248,8 +267,8 @@ def generate_json_logic(excel_file, template_data):
         
     cust = final_json["CustomerInformation"]["Customers"][0]
     if "Id" not in cust: cust["Id"] = str(uuid.uuid4())
-    cust["Name"] = customer_name
-    cust["SupplierCode"] = supplier_code
+    if customer_name: cust["Name"] = customer_name
+    if supplier_code: cust["SupplierCode"] = supplier_code
     
     if "Csrs" not in cust or not isinstance(cust["Csrs"], list):
         cust["Csrs"] = [{}]
@@ -257,10 +276,10 @@ def generate_json_logic(excel_file, template_data):
         cust["Csrs"].append({})
         
     csr = cust["Csrs"][0]
-    csr["Name"] = customer_name
-    csr["SupplierCode"] = supplier_code
-    csr["NameCSRDocument"] = csr_name
-    csr["DateCSRDocument"] = csr_date
+    if customer_name: csr["Name"] = customer_name
+    if supplier_code: csr["SupplierCode"] = supplier_code
+    if csr_name: csr["NameCSRDocument"] = csr_name
+    if csr_date: csr["DateCSRDocument"] = csr_date
 
     # D. 文件清单定点替换
     docs_list = []
@@ -316,13 +335,13 @@ def generate_json_logic(excel_file, template_data):
 
     # F. 最终结果日期定点替换
     ensure_path(final_json, ["Results", "AuditReportFinal"])
-    final_json["Results"]["AuditReportFinal"]["Date"] = end_iso
-    final_json["Results"]["DateNextScheduledAudit"] = next_audit_iso
+    if end_iso: final_json["Results"]["AuditReportFinal"]["Date"] = end_iso
+    if next_audit_iso: final_json["Results"]["DateNextScheduledAudit"] = next_audit_iso
 
     return final_json
 
 # ================= 主界面展示 =================
-st.title("🎯 IATF 审计数据转换工具 (v23.0)")
+st.title("🎯 IATF 审计数据转换工具 (v24.0)")
 st.markdown(f"**当前套用模板**：`{template_name}`")
 
 uploaded_files = st.file_uploader("📥 上传 Excel 数据表", type=["xlsx"], accept_multiple_files=True)
