@@ -10,8 +10,8 @@ from datetime import datetime, timedelta
 
 # --- 页面配置 ---
 st.set_page_config(
-    page_title="IATF 审计转换工具 (v29.0 防弹版)",
-    page_icon="🎯",
+    page_title="IATF 审计转换工具 (v30.0)",
+    page_icon="🛡️",
     layout="wide"
 )
 
@@ -88,26 +88,19 @@ def generate_json_logic(excel_file, template_data):
         match = re.search(r'(?:CCAA[:：\s-])\s*(.*)', ccaa_raw, re.IGNORECASE | re.DOTALL)
         caa_no = match.group(1).strip() if match else ccaa_raw.strip()
 
-    # 💥 [AuditorId 终极防弹修复]
-    # 扩大搜索词库，兼容所有变体表头
+    # 💥 [AuditorId 还原为早期最稳定的提取逻辑]
     auditor_id = ""
-    for df in [info_df, db_df]:
-        if df.empty: continue
-        for r in range(df.shape[0]):
-            for c in range(df.shape[1]):
-                cell_text = str(df.iloc[r, c])
-                if "IATF Card" in cell_text or "IATF卡号" in cell_text or "IATF ID" in cell_text:
-                    if c + 1 < df.shape[1]:
-                        raw_val = str(df.iloc[r, c + 1]).strip()
-                        if raw_val and raw_val.lower() != 'nan':
-                            # 替换换行，精准剔除前缀
-                            raw_val = raw_val.replace('\n', ' ').replace('\r', ' ')
-                            clean_val = re.sub(r'^.*?IATF[:：\s-]*', '', raw_val, flags=re.IGNORECASE).strip()
-                            if len(clean_val) > 4:
-                                auditor_id = clean_val
-                                break
-            if auditor_id: break
-        if auditor_id: break
+    if not info_df.empty:
+        for r in range(info_df.shape[0]):
+            for c in range(info_df.shape[1]):
+                cell_text = str(info_df.iloc[r, c])
+                if "IATF Card" in cell_text or "IATF卡号" in cell_text:
+                    if c + 1 < info_df.shape[1]:
+                        raw_val = str(info_df.iloc[r, c + 1]).strip()
+                        raw_val = raw_val.replace('\n', ' ').replace('\r', ' ')
+                        auditor_id = re.sub(r'^IATF[:：\s-]*', '', raw_val, flags=re.IGNORECASE).strip()
+                        if len(auditor_id) > 4: break
+            if auditor_id and len(auditor_id) > 4: break
 
     # [日期]
     start_date_raw = find_val_by_key(db_df, ["审核开始日期", "审核开始时间"])
@@ -126,11 +119,11 @@ def generate_json_logic(excel_file, template_data):
         if pd.notna(end_dt): next_audit_iso = (end_dt + timedelta(days=45)).strftime('%Y-%m-%d') + "T00:00:00.000Z"
     except: pass
 
-    # 💥 [英文地址智能剥离与倒序切分]
+    # 💥 [英文地址：剥离换行符 + 倒序切分 完美融合]
     native_street = ""
     english_address = ""
 
-    # 首先扫描 info_df 寻找 "审核地址"
+    # 直接在“信息”表中寻找审核地址
     if not info_df.empty:
         for r in range(info_df.shape[0]):
             for c in range(info_df.shape[1]):
@@ -139,46 +132,20 @@ def generate_json_logic(excel_file, template_data):
                     if c + 1 < info_df.shape[1]:
                         rv = str(info_df.iloc[r, c+1]).strip()
                         if rv and rv.lower() != 'nan':
-                            # 【核心修复】：按换行符拆开，把中文行和英文行强行剥离！
+                            # 1. 拆分换行符，中英文精准分离
                             lines = rv.replace('\r', '\n').split('\n')
                             en_lines = [l.strip() for l in lines if not re.search(r'[\u4e00-\u9fff]', l) and l.strip()]
                             zh_lines = [l.strip() for l in lines if re.search(r'[\u4e00-\u9fff]', l) and l.strip()]
+                            
                             if en_lines: english_address = " ".join(en_lines)
                             if zh_lines: native_street = " ".join(zh_lines)
                         break
-            if english_address or native_street: break
+            if english_address: break
 
-    # 如果信息表没找到，去 db_df 里找备用地址
-    if not english_address or not native_street:
-        candidates = []
-        for r in range(db_df.shape[0]):
-            for c in range(db_df.shape[1]):
-                val = str(db_df.iloc[r, c])
-                if "地址" in val or "Address" in val:
-                    if c+1 < db_df.shape[1]: 
-                        v1 = str(db_df.iloc[r, c+1]).strip()
-                        if v1 and v1.lower() != 'nan': candidates.append(v1)
-                    if c+4 < db_df.shape[1]: 
-                        v4 = str(db_df.iloc[r, c+4]).strip()
-                        if v4 and v4.lower() != 'nan': candidates.append(v4)
-        
-        # 对所有候选进行中英剥离
-        for cand in candidates:
-            lines = cand.replace('\r', '\n').split('\n')
-            en_lines = [l.strip() for l in lines if not re.search(r'[\u4e00-\u9fff]', l) and l.strip()]
-            zh_lines = [l.strip() for l in lines if re.search(r'[\u4e00-\u9fff]', l) and l.strip()]
-            
-            if not english_address and en_lines:
-                en_cand = " ".join(en_lines)
-                if len(en_cand) > len(english_address): english_address = en_cand
-            if not native_street and zh_lines:
-                zh_cand = " ".join(zh_lines)
-                if len(zh_cand) > len(native_street): native_street = zh_cand
-
-    # 应用完美倒序切分逻辑
+    # 2. 纯英文地址倒序切分逻辑
     street, city, state, country = english_address, "", "", ""
     if english_address:
-        clean_eng = english_address.replace('\n', ' ').replace('\r', ' ').replace('，', ',')
+        clean_eng = english_address.replace('，', ',')
         parts = [p.strip() for p in clean_eng.split(',') if p.strip()]
         
         if len(parts) >= 3:
@@ -205,12 +172,12 @@ def generate_json_logic(excel_file, template_data):
         team.update({
             "Name": auditor_name,
             "CaaNo": caa_no,
-            "AuditorId": auditor_id,  # 更新修复后的 AuditorId
+            "AuditorId": auditor_id,  # 已经恢复为稳定的取值
             "AuditDaysPerformed": 1.5,
             "DatesOnSite": [{"Date": start_iso, "Day": 1}, {"Date": end_iso, "Day": 0.5}]
         })
 
-    # B. 组织与地址信息 (完美写入 Address 节点)
+    # B. 组织与地址信息
     ensure_path(final_json, ["OrganizationInformation", "AddressNative"])
     ensure_path(final_json, ["OrganizationInformation", "Address"])
     org = final_json["OrganizationInformation"]
@@ -246,7 +213,7 @@ def generate_json_logic(excel_file, template_data):
                 "ProcessName": p_name,
                 "AuditNotes": [{
                     "Id": str(uuid.uuid4()),
-                    "AuditorId": auditor_id, # 同步写入 AuditorId
+                    "AuditorId": auditor_id,
                     "ManufacturingProcess": "0",
                     "OnSiteProcess": "1",
                     "RemoteProcess": "0"
@@ -265,7 +232,7 @@ def generate_json_logic(excel_file, template_data):
     return final_json
 
 # ================= 主界面 =================
-st.title("🚀 多模板审计转换引擎 (v29.0 防弹版)")
+st.title("🛡️ 多模板审计转换引擎 (v30.0 稳定版)")
 st.write(f"当前生效模板：**{template_name}**")
 
 uploaded_files = st.file_uploader("📥 上传 Excel 数据表", type=["xlsx"], accept_multiple_files=True)
@@ -278,10 +245,9 @@ if uploaded_files:
             team = res_json["AuditData"]["AuditTeam"][0]
             st.success(f"✅ {file.name} 转换成功")
             
-            # 实时预览我们最关心的 AuditorId 和 地址切分结果
             with st.expander("👀 查看关键字段提取预览", expanded=True):
                  st.code(f"""
-AuditorId: {team['AuditorId']}
+AuditorId: {team.get('AuditorId', '')}
 -------------------------
 【Address 切分结果】
 State:   {res_json['OrganizationInformation']['Address'].get('State', '')}
@@ -298,15 +264,3 @@ Street1: {res_json['OrganizationInformation']['Address'].get('Street1', '')}
             )
         except Exception as e:
             st.error(f"❌ {file.name} 处理失败: {str(e)}")
-
-
-
-
-
-
-
-
-
-
-
-
