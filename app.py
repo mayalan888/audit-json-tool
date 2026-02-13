@@ -8,7 +8,7 @@ import copy
 import re
 from datetime import datetime, timedelta
 
-st.set_page_config(page_title="IATF 审计转换工具 (v22.0)", page_icon="🎯", layout="wide")
+st.set_page_config(page_title="IATF 审计转换工具 (v23.0)", page_icon="🎯", layout="wide")
 
 # ================= UI：强制要求上传模板 =================
 with st.sidebar:
@@ -132,6 +132,7 @@ def generate_json_logic(excel_file, template_data):
     csr_name = find_val_by_key(db_df, ["CSR文件名称"])
     csr_date = fmt_iso(find_val_by_key(db_df, ["CSR文件日期"]))
 
+    # 中文地址提取
     zh_addr = ""
     addr_candidates = []
     if not db_df.empty:
@@ -145,48 +146,44 @@ def generate_json_logic(excel_file, template_data):
         if cand and cand.lower() != 'nan' and re.search(r'[\u4e00-\u9fff]', cand):
             if len(cand) > len(zh_addr): zh_addr = cand
 
-    # 💥 (D) 英文地址拼接修复逻辑
+    # 💥 (D) 英文地址全局智能搜寻与断行修复
     en_state, en_city, en_country, en_street1 = "", "", "", ""
     en_addr_raw = ""
     
-    if not info_df.empty:
-        for r in range(info_df.shape[0]):
-            for c in range(info_df.shape[1]):
-                cell_text = str(info_df.iloc[r, c]).strip()
-                if "审核地址" in cell_text or "Audit Address" in cell_text:
-                    if c + 1 < info_df.shape[1]:
-                        val = str(info_df.iloc[r, c+1]).strip()
-                        if re.search(r'[a-zA-Z]', val):
-                            en_addr_raw = val
-                            break
+    # 扫描全表，锁定包含 PROVINCE/CITY 和 CHINA 的格子（这才是真正的英文地址）
+    for df in [info_df, db_df]:
+        if df.empty: continue
+        for r in range(df.shape[0]):
+            for c in range(df.shape[1]):
+                val = str(df.iloc[r, c]).strip()
+                val_upper = val.upper()
+                if ("PROVINCE" in val_upper or "CITY" in val_upper) and "CHINA" in val_upper:
+                    en_addr_raw = val
+                    break
             if en_addr_raw: break
+        if en_addr_raw: break
 
     if en_addr_raw:
-        lines = en_addr_raw.replace('\r', '\n').split('\n')
-        # 保留所有不含中文的英文行
-        en_lines = [l.strip() for l in lines if not re.search(r'[\u4e00-\u9fff]', l) and l.strip()]
+        # 1. 把换行符全替换为空格！让被切断的 "LOUDI" 和 "CITY" 重新连在一起
+        clean_addr = en_addr_raw.replace('\n', ' ').replace('\r', ' ').replace('，', ',')
         
-        # 核心修复：用空格将多行英文拼接到一起，防止 LOUDI 和 CITY 断开
-        if en_lines:
-            en_addr_str = " ".join(en_lines)
-        else:
-            en_addr_str = en_addr_raw.replace('\n', ' ')
-            
-        address_str = en_addr_str.replace('，', ',')
-        parts = [p.strip() for p in address_str.split(',') if p.strip()]
+        # 2. 按照逗号切割
+        parts = [p.strip() for p in clean_addr.split(',') if p.strip()]
         
+        # 3. 剔除所有中文字符并清洗多余空格
         en_parts = []
         for p in parts:
             if re.search(r'[a-zA-Z]', p):
                 p_clean = re.sub(r'[\u4e00-\u9fff]', '', p).strip()
-                en_parts.append(p_clean)
+                p_clean = re.sub(r'\s+', ' ', p_clean) # 把多个连在一起的空格变成一个
+                if p_clean:
+                    en_parts.append(p_clean)
 
         if en_parts:
-            # 1. 取出最后的 Country
+            # 最后一个必为 Country
             en_country = en_parts.pop(-1)
             
             street_parts = []
-            # 2. 遍历分配 State, City, Street1
             for p in en_parts:
                 p_upper = p.upper()
                 if "PROVINCE" in p_upper:
@@ -194,6 +191,7 @@ def generate_json_logic(excel_file, template_data):
                 elif "CITY" in p_upper:
                     en_city = p
                 else:
+                    # 剩下的全归 Street1
                     street_parts.append(p)
             
             en_street1 = ", ".join(street_parts)
@@ -234,10 +232,12 @@ def generate_json_logic(excel_file, template_data):
     org["AddressNative"]["PostalCode"] = postal_code
     org["AddressNative"]["Country"] = "中国"
     
+    # 精准填入切分好的纯英文地址，同步更新 PostalCode
     org["Address"]["State"] = en_state
     org["Address"]["City"] = en_city
     org["Address"]["Country"] = en_country
     org["Address"]["Street1"] = en_street1
+    org["Address"]["PostalCode"] = postal_code 
 
     # C. 顾客与 CSR 定点替换
     ensure_path(final_json, ["CustomerInformation"])
@@ -322,7 +322,7 @@ def generate_json_logic(excel_file, template_data):
     return final_json
 
 # ================= 主界面展示 =================
-st.title("🎯 IATF 审计数据转换工具 (v22.0)")
+st.title("🎯 IATF 审计数据转换工具 (v23.0)")
 st.markdown(f"**当前套用模板**：`{template_name}`")
 
 uploaded_files = st.file_uploader("📥 上传 Excel 数据表", type=["xlsx"], accept_multiple_files=True)
