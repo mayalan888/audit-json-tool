@@ -10,7 +10,7 @@ from datetime import datetime, timedelta
 
 # --- 页面配置 ---
 st.set_page_config(
-    page_title="IATF 审计转换工具 (v33.0)",
+    page_title="IATF 审计转换工具 (v34.0 稳定版)",
     page_icon="🛡️",
     layout="wide"
 )
@@ -58,6 +58,7 @@ def generate_json_logic(excel_file, template_data):
     except Exception as e:
         raise ValueError(f"Excel 读取失败: {str(e)}")
 
+    # 智能游动扫描
     def find_val_by_key(df, keywords, col_offset=1):
         if df.empty: return ""
         for r in range(df.shape[0]):
@@ -68,11 +69,18 @@ def generate_json_logic(excel_file, template_data):
                         if c + col_offset < df.shape[1]:
                             return str(df.iloc[r, c + col_offset]).strip()
         return ""
+        
+    # 绝对坐标兜底 (直接照搬 V8 稳定版的坐标)
+    def get_db_val(r, c):
+        try:
+            val = db_df.iloc[r, c]
+            return str(val).strip() if pd.notna(val) else ""
+        except: return ""
 
-    # ================= 1. 数据提取 =================
+    # ================= 1. 数据提取 (双重保险) =================
     
     # [姓名]
-    raw_name_full = find_val_by_key(db_df, ["姓名", "Auditor Name"])
+    raw_name_full = find_val_by_key(db_df, ["姓名", "Auditor Name"]) or get_db_val(5, 1)
     raw_name = raw_name_full.replace("姓名:", "").replace("Name:", "").strip() if raw_name_full else ""
     auditor_name = raw_name
     english_part = re.sub(r'[\u4e00-\u9fff]', '', raw_name).strip()
@@ -82,13 +90,13 @@ def generate_json_logic(excel_file, template_data):
         else: auditor_name = english_part
 
     # [CCAA]
-    ccaa_raw = find_val_by_key(db_df, ["审核员CCAA", "CCAA"])
+    ccaa_raw = find_val_by_key(db_df, ["审核员CCAA", "CCAA"]) or get_db_val(4, 1)
     caa_no = ""
     if ccaa_raw:
         match = re.search(r'(?:CCAA[:：\s-])\s*(.*)', ccaa_raw, re.IGNORECASE | re.DOTALL)
         caa_no = match.group(1).strip() if match else ccaa_raw.strip()
 
-    # [AuditorId 稳定版提取逻辑]
+    # [AuditorId]
     auditor_id = ""
     if not info_df.empty:
         for r in range(info_df.shape[0]):
@@ -102,30 +110,35 @@ def generate_json_logic(excel_file, template_data):
                         if len(auditor_id) > 4: break
             if auditor_id and len(auditor_id) > 4: break
 
-    # [日期]
-    start_date_raw = find_val_by_key(db_df, ["审核开始日期", "审核开始时间"])
-    end_date_raw = find_val_by_key(db_df, ["审核结束日期", "审核结束时间"])
+    # 💥 [日期深度修复：双重保险 + 强制格式化]
+    start_date_raw = find_val_by_key(db_df, ["审核开始日期", "审核开始时间"]) or get_db_val(2, 1)
+    end_date_raw = find_val_by_key(db_df, ["审核结束日期", "审核结束时间"]) or get_db_val(3, 1)
+    
     def fmt_iso(val):
         try:
-            dt = pd.to_datetime(val, errors='coerce')
+            clean_val = str(val).replace('年', '-').replace('月', '-').replace('日', '')
+            dt = pd.to_datetime(clean_val, errors='coerce')
             if pd.notna(dt): return dt.strftime('%Y-%m-%d') + "T00:00:00.000Z"
         except: pass
         return ""
+        
     start_iso, end_iso = fmt_iso(start_date_raw), fmt_iso(end_date_raw)
     
     next_audit_iso = ""
     try:
-        end_dt = pd.to_datetime(end_date_raw, errors='coerce')
+        clean_end = str(end_date_raw).replace('年', '-').replace('月', '-').replace('日', '')
+        end_dt = pd.to_datetime(clean_end, errors='coerce')
         if pd.notna(end_dt): next_audit_iso = (end_dt + timedelta(days=45)).strftime('%Y-%m-%d') + "T00:00:00.000Z"
     except: pass
 
-    # [顾客与 CSR 提取]
-    customer_name = find_val_by_key(db_df, ["顾客", "客户名称"])
-    supplier_code = find_val_by_key(db_df, ["供应商编码", "供应商代码"])
-    csr_name = find_val_by_key(db_df, ["CSR文件名称"])
-    csr_date = fmt_iso(find_val_by_key(db_df, ["CSR文件日期"]))
+    # [顾客与 CSR]
+    customer_name = find_val_by_key(db_df, ["顾客", "客户名称"]) or get_db_val(29, 1)
+    supplier_code = find_val_by_key(db_df, ["供应商编码", "供应商代码"]) or get_db_val(30, 1)
+    csr_name = find_val_by_key(db_df, ["CSR文件名称"]) or get_db_val(31, 1)
+    csr_date_raw = find_val_by_key(db_df, ["CSR文件日期"]) or get_db_val(32, 1)
+    csr_date = fmt_iso(csr_date_raw)
 
-    # [英文地址：剥离换行符 + 倒序切分]
+    # [英文地址倒序切分]
     native_street = ""
     english_address = ""
 
@@ -164,9 +177,9 @@ def generate_json_logic(excel_file, template_data):
 
     # A. 审核数据
     ensure_path(final_json, ["AuditData", "AuditData"])
-    final_json["AuditData"]["AuditData"]["start"] = start_iso
-    final_json["AuditData"]["AuditData"]["end"] = end_iso
-    final_json["AuditData"]["CbIdentificationNo"] = find_val_by_key(db_df, ["认证机构标识号"])
+    if start_iso: final_json["AuditData"]["AuditData"]["start"] = start_iso
+    if end_iso: final_json["AuditData"]["AuditData"]["end"] = end_iso
+    final_json["AuditData"]["CbIdentificationNo"] = find_val_by_key(db_df, ["认证机构标识号"]) or get_db_val(2, 4)
 
     if "AuditTeam" in final_json["AuditData"] and len(final_json["AuditData"]["AuditTeam"]) > 0:
         team = final_json["AuditData"]["AuditTeam"][0]
@@ -183,23 +196,21 @@ def generate_json_logic(excel_file, template_data):
     ensure_path(final_json, ["OrganizationInformation", "Address"])
     org = final_json["OrganizationInformation"]
     
-    org["OrganizationName"] = find_val_by_key(db_df, ["组织名称"])
+    org["OrganizationName"] = find_val_by_key(db_df, ["组织名称"]) or get_db_val(1, 4)
     org["IndustryCode"] = find_val_by_key(db_df, ["行业代码", "Industry Code"])
-    org["IATF_USI"] = find_val_by_key(db_df, ["IATF USI", "USI"])
-    org["TotalNumberEmployees"] = find_val_by_key(db_df, ["包括扩展现场在内的员工总数", "员工总数"])
+    org["IATF_USI"] = find_val_by_key(db_df, ["IATF USI", "USI"]) or get_db_val(3, 4)
+    org["TotalNumberEmployees"] = find_val_by_key(db_df, ["包括扩展现场在内的员工总数", "员工总数"]) or get_db_val(27, 1)
     org["CertificateScope"] = find_val_by_key(db_df, ["证书范围"])
     
-    # 💥 【精确修正】：将“组织代表”加入搜索词库
-    org["Representative"] = find_val_by_key(db_df, ["组织代表", "管理者代表", "联系人", "Representative"])
-    org["Telephone"] = find_val_by_key(db_df, ["联系电话", "电话", "Telephone"])
-    
-    extracted_email = find_val_by_key(db_df, ["电子邮箱", "邮箱", "Email", "E-mail"])
-    org["Email"] = "" if extracted_email == "0" else extracted_email
+    org["Representative"] = find_val_by_key(db_df, ["组织代表", "管理者代表", "联系人", "Representative"]) or get_db_val(15, 1)
+    org["Telephone"] = find_val_by_key(db_df, ["联系电话", "电话", "Telephone"]) or get_db_val(15, 4)
+    extracted_email = find_val_by_key(db_df, ["电子邮箱", "邮箱", "Email", "E-mail"]) or get_db_val(16, 1)
+    org["Email"] = "" if str(extracted_email).strip() == "0" else extracted_email
     
     org["AddressNative"].update({
         "Street1": native_street,
         "Country": "中国",
-        "PostalCode": find_val_by_key(db_df, ["邮政编码"])
+        "PostalCode": find_val_by_key(db_df, ["邮政编码"]) or get_db_val(10, 4)
     })
     
     org["Address"].update({
@@ -207,7 +218,7 @@ def generate_json_logic(excel_file, template_data):
         "City": city, 
         "Country": country, 
         "Street1": street,
-        "PostalCode": find_val_by_key(db_df, ["邮政编码"])
+        "PostalCode": find_val_by_key(db_df, ["邮政编码"]) or get_db_val(10, 4)
     })
 
     # C. 顾客与 CSR 定点替换
@@ -233,33 +244,7 @@ def generate_json_logic(excel_file, template_data):
     if csr_name: csr["NameCSRDocument"] = csr_name
     if csr_date: csr["DateCSRDocument"] = csr_date
 
-    # D. 文件清单定点替换
-    docs_list = []
-    if not doc_list_df.empty:
-        for c in range(doc_list_df.shape[1]):
-            for r in range(doc_list_df.shape[0]):
-                cell_val = str(doc_list_df.iloc[r, c]).strip()
-                if "公司内对应的程序文件" in cell_val or "包含名称、编号、版本" in cell_val:
-                    for r2 in range(r + 1, doc_list_df.shape[0]):
-                        val = str(doc_list_df.iloc[r2, c]).strip()
-                        if val and val.lower() != 'nan':
-                            docs_list.append(val)
-                    break
-            if docs_list: break
-
-    if docs_list:
-        ensure_path(final_json, ["Stage1DocumentedRequirements"])
-        if "IatfClauseDocuments" not in final_json["Stage1DocumentedRequirements"] or not isinstance(final_json["Stage1DocumentedRequirements"]["IatfClauseDocuments"], list):
-            final_json["Stage1DocumentedRequirements"]["IatfClauseDocuments"] = []
-            
-        clause_docs = final_json["Stage1DocumentedRequirements"]["IatfClauseDocuments"]
-        for i, doc_name in enumerate(docs_list):
-            if i < len(clause_docs):
-                clause_docs[i]["DocumentName"] = doc_name
-            else:
-                clause_docs.append({"DocumentName": doc_name})
-
-    # E. 过程清单重建
+    # D. 过程清单重建
     processes = []
     if not proc_df.empty:
         clause_cols = proc_df.columns[13:] if proc_df.shape[1] > 13 else []
@@ -282,15 +267,17 @@ def generate_json_logic(excel_file, template_data):
             processes.append(proc_obj)
     final_json["Processes"] = processes
 
-    # F. 结果日期
-    ensure_path(final_json, ["Results", "AuditReportFinal"])
-    final_json["Results"]["AuditReportFinal"]["Date"] = end_iso
-    final_json["Results"]["DateNextScheduledAudit"] = next_audit_iso
+    # 💥 E. 结果日期：强制重新校验与写入
+    if "Results" not in final_json: final_json["Results"] = {}
+    if "AuditReportFinal" not in final_json["Results"]: final_json["Results"]["AuditReportFinal"] = {}
+    
+    if end_iso: final_json["Results"]["AuditReportFinal"]["Date"] = end_iso
+    if next_audit_iso: final_json["Results"]["DateNextScheduledAudit"] = next_audit_iso
 
     return final_json
 
 # ================= 主界面 =================
-st.title("🛡️ 多模板审计转换引擎 (v33.0 术语精准版)")
+st.title("🛡️ 多模板审计转换引擎 (v34.0 绝不漏抓版)")
 st.write(f"当前生效模板：**{template_name}**")
 
 uploaded_files = st.file_uploader("📥 上传 Excel 数据表", type=["xlsx"], accept_multiple_files=True)
@@ -300,27 +287,20 @@ if uploaded_files:
     for file in uploaded_files:
         try:
             res_json = generate_json_logic(file, active_template)
-            team = res_json["AuditData"]["AuditTeam"][0]
-            org = res_json["OrganizationInformation"]
+            
+            # 安全获取预览数据
+            res_dict = res_json.get("Results", {})
+            audit_report = res_dict.get("AuditReportFinal", {})
             
             st.success(f"✅ {file.name} 转换成功")
             
-            with st.expander("👀 查看关键字段提取预览", expanded=True):
+            with st.expander("👀 查看日期与核心字段诊断面板", expanded=True):
                  st.code(f"""
-Organization: {org.get('OrganizationName', '')}
-IndustryCode: {org.get('IndustryCode', '')}
-AuditorId:    {team.get('AuditorId', '')}
--------------------------
-【联系人信息】
-Representative: {org.get('Representative', '')}
-Telephone:      {org.get('Telephone', '')}
-Email:          {org.get('Email', '')}
--------------------------
-【Address 切分结果】
-State:   {org['Address'].get('State', '')}
-City:    {org['Address'].get('City', '')}
-Country: {org['Address'].get('Country', '')}
-Street1: {org['Address'].get('Street1', '')}
+【日期校验】
+AuditDate (Start): {res_json.get('AuditData', {}).get('AuditData', {}).get('start', '未提取到')}
+AuditDate (End):   {res_json.get('AuditData', {}).get('AuditData', {}).get('end', '未提取到')}
+AuditReportFinal:  {audit_report.get('Date', '未提取到')}
+NextScheduled:     {res_dict.get('DateNextScheduledAudit', '未提取到')}
                  """.strip(), language="yaml")
                  
             st.download_button(
@@ -331,6 +311,7 @@ Street1: {org['Address'].get('Street1', '')}
             )
         except Exception as e:
             st.error(f"❌ {file.name} 处理失败: {str(e)}")
+
 
 
 
