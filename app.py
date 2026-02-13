@@ -8,7 +8,7 @@ import copy
 import re
 from datetime import datetime, timedelta
 
-st.set_page_config(page_title="IATF 审计转换工具 (v17.0)", page_icon="🎯", layout="wide")
+st.set_page_config(page_title="IATF 审计转换工具 (v18.0)", page_icon="🎯", layout="wide")
 
 # ================= UI：强制要求上传模板 =================
 with st.sidebar:
@@ -41,7 +41,7 @@ def ensure_path(d, path):
 
 # --- 核心数据转换逻辑 ---
 def generate_json_logic(excel_file, template_data):
-    # 深度拷贝模板
+    # 深度拷贝模板，绝不作任何覆盖或删改
     final_json = copy.deepcopy(template_data)
     
     try:
@@ -102,7 +102,7 @@ def generate_json_logic(excel_file, template_data):
                             break
             if auditor_id: break
 
-    # (B) 日期提取（已更新为：审核开始日期 / 审核结束日期）
+    # (B) 日期提取
     start_date_raw = find_val_by_key(db_df, ["审核开始日期", "审核开始时间"])
     end_date_raw = find_val_by_key(db_df, ["审核结束日期", "审核结束时间"])
     
@@ -152,10 +152,11 @@ def generate_json_logic(excel_file, template_data):
 
     # A. 审核基础信息定点替换
     ensure_path(final_json, ["AuditData", "AuditDate"])
-    # 映射 Start 和 End (兼容处理)
     final_json["AuditData"]["AuditDate"]["Start"] = start_iso
     final_json["AuditData"]["AuditDate"]["End"] = end_iso
-    final_json["AuditData"]["CbIdentificationNo"] = find_val_by_key(db_df, ["认证机构识别号"])
+    
+    # 💥 已修正：精确搜索 "认证机构标识号"
+    final_json["AuditData"]["CbIdentificationNo"] = find_val_by_key(db_df, ["认证机构标识号", "认证机构识别号"])
 
     if "AuditTeam" not in final_json["AuditData"] or not isinstance(final_json["AuditData"]["AuditTeam"], list):
         final_json["AuditData"]["AuditTeam"] = [{}]
@@ -264,7 +265,7 @@ def generate_json_logic(excel_file, template_data):
     return final_json
 
 # ================= 主界面展示 =================
-st.title("🎯 IATF 审计数据转换工具 (v17.0)")
+st.title("🎯 IATF 审计数据转换工具 (v18.0)")
 st.markdown(f"**当前套用模板**：`{template_name}`")
 
 uploaded_files = st.file_uploader("📥 上传 Excel 数据表", type=["xlsx"], accept_multiple_files=True)
@@ -285,4 +286,5 @@ if uploaded_files:
                     st.download_button("📥 下载生成后的 JSON", data=json.dumps(res_json, indent=2, ensure_ascii=False), file_name=file.name.replace(".xlsx", ".json"), key=f"dl_{file.name}")
         except Exception as e:
             st.error(f"❌ {file.name} 处理失败: {str(e)}")
+
 
