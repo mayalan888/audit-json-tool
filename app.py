@@ -10,7 +10,7 @@ from datetime import datetime, timedelta
 
 # --- 页面配置 ---
 st.set_page_config(
-    page_title="IATF 审计转换工具 (v32.0)",
+    page_title="IATF 审计转换工具 (v33.0)",
     page_icon="🛡️",
     layout="wide"
 )
@@ -178,7 +178,7 @@ def generate_json_logic(excel_file, template_data):
             "DatesOnSite": [{"Date": start_iso, "Day": 1}, {"Date": end_iso, "Day": 0.5}]
         })
 
-    # B. 组织与地址信息 💥(恢复误删的所有联系人信息及基础信息)
+    # B. 组织与地址信息 
     ensure_path(final_json, ["OrganizationInformation", "AddressNative"])
     ensure_path(final_json, ["OrganizationInformation", "Address"])
     org = final_json["OrganizationInformation"]
@@ -189,11 +189,10 @@ def generate_json_logic(excel_file, template_data):
     org["TotalNumberEmployees"] = find_val_by_key(db_df, ["包括扩展现场在内的员工总数", "员工总数"])
     org["CertificateScope"] = find_val_by_key(db_df, ["证书范围"])
     
-    # 【新增补齐】：联系人信息
-    org["Representative"] = find_val_by_key(db_df, ["管理者代表", "联系人", "Representative"])
+    # 💥 【精确修正】：将“组织代表”加入搜索词库
+    org["Representative"] = find_val_by_key(db_df, ["组织代表", "管理者代表", "联系人", "Representative"])
     org["Telephone"] = find_val_by_key(db_df, ["联系电话", "电话", "Telephone"])
     
-    # 邮箱特殊处理逻辑：如果提取到 "0" 则置空
     extracted_email = find_val_by_key(db_df, ["电子邮箱", "邮箱", "Email", "E-mail"])
     org["Email"] = "" if extracted_email == "0" else extracted_email
     
@@ -291,7 +290,7 @@ def generate_json_logic(excel_file, template_data):
     return final_json
 
 # ================= 主界面 =================
-st.title("🛡️ 多模板审计转换引擎 (v32.0 终极全量版)")
+st.title("🛡️ 多模板审计转换引擎 (v33.0 术语精准版)")
 st.write(f"当前生效模板：**{template_name}**")
 
 uploaded_files = st.file_uploader("📥 上传 Excel 数据表", type=["xlsx"], accept_multiple_files=True)
@@ -306,7 +305,6 @@ if uploaded_files:
             
             st.success(f"✅ {file.name} 转换成功")
             
-            # 更新预览面板，将联系人信息展示出来
             with st.expander("👀 查看关键字段提取预览", expanded=True):
                  st.code(f"""
 Organization: {org.get('OrganizationName', '')}
@@ -333,5 +331,6 @@ Street1: {org['Address'].get('Street1', '')}
             )
         except Exception as e:
             st.error(f"❌ {file.name} 处理失败: {str(e)}")
+
 
 
