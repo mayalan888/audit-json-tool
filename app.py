@@ -8,7 +8,7 @@ import copy
 import re
 from datetime import datetime, timedelta
 
-st.set_page_config(page_title="IATF 审计转换工具 (v20.1)", page_icon="🎯", layout="wide")
+st.set_page_config(page_title="IATF 审计转换工具 (v21.0)", page_icon="🎯", layout="wide")
 
 # ================= UI：强制要求上传模板 =================
 with st.sidebar:
@@ -147,28 +147,59 @@ def generate_json_logic(excel_file, template_data):
         if cand and cand.lower() != 'nan' and re.search(r'[\u4e00-\u9fff]', cand):
             if len(cand) > len(zh_addr): zh_addr = cand
 
-    # (D) 英文地址精准提取并切割
+    # 💥 (D) 英文地址终极切分逻辑
     en_state, en_city, en_country, en_street1 = "", "", "", ""
-    audit_address_raw = find_val_by_key(info_df, ["审核地址", "Audit Address"])
+    en_addr_raw = ""
     
-    if audit_address_raw:
-        lines = audit_address_raw.replace('\r', '\n').split('\n')
-        en_lines = [l.strip() for l in lines if not re.search(r'[\u4e00-\u9fff]', l) and l.strip()]
-        en_addr_str = en_lines[0] if en_lines else audit_address_raw
-        address_str = en_addr_str.replace('，', ',')
-        parts = [p.strip() for p in address_str.split(',') if p.strip()]
+    if not info_df.empty:
+        # 遍历全表，专门寻找内容包含英文字母的“审核地址”
+        for r in range(info_df.shape[0]):
+            for c in range(info_df.shape[1]):
+                cell_text = str(info_df.iloc[r, c]).strip()
+                if "审核地址" in cell_text or "Audit Address" in cell_text:
+                    if c + 1 < info_df.shape[1]:
+                        val = str(info_df.iloc[r, c+1]).strip()
+                        # 核心判定：必须包含英文字母，排除纯中文格子的干扰
+                        if re.search(r'[a-zA-Z]', val):
+                            en_addr_raw = val
+                            break
+            if en_addr_raw: break
+
+    if en_addr_raw:
+        # 1. 将所有的换行符替换为空格，修复 "LOUDI\nCITY" 被截断的问题
+        clean_addr = en_addr_raw.replace('\n', ' ').replace('\r', ' ')
+        # 2. 统一全角逗号为半角逗号
+        clean_addr = clean_addr.replace('，', ',')
         
-        if parts:
-            en_country = parts.pop(-1)
+        # 3. 按逗号切割并去除首尾空格
+        parts = [p.strip() for p in clean_addr.split(',') if p.strip()]
+        
+        # 4. 剔除可能混入的中文字符片段
+        en_parts = []
+        for p in parts:
+            if re.search(r'[a-zA-Z]', p):
+                p_clean = re.sub(r'[\u4e00-\u9fff]', '', p).strip()
+                en_parts.append(p_clean)
+            elif not re.search(r'[\u4e00-\u9fff]', p):
+                en_parts.append(p)
+
+        if en_parts:
+            # 取出最后一个逗号后的元素作为 Country
+            en_country = en_parts.pop(-1)
+            
             street_parts = []
-            for p in parts:
+            # 遍历剩下的元素，精准分配
+            for p in en_parts:
                 p_upper = p.upper()
                 if "PROVINCE" in p_upper:
                     en_state = p
                 elif "CITY" in p_upper:
                     en_city = p
                 else:
+                    # 既没有 PROVINCE 也没有 CITY 的，全部归入 Street1
                     street_parts.append(p)
+            
+            # 把分离出的 Street1 用逗号重新拼接
             en_street1 = ", ".join(street_parts)
 
     # ================= 2. 定点替换逻辑 =================
@@ -207,6 +238,7 @@ def generate_json_logic(excel_file, template_data):
     org["AddressNative"]["PostalCode"] = postal_code
     org["AddressNative"]["Country"] = "中国"
     
+    # 填入刚刚完美切分好的英文地址
     org["Address"]["State"] = en_state
     org["Address"]["City"] = en_city
     org["Address"]["Country"] = en_country
@@ -295,7 +327,7 @@ def generate_json_logic(excel_file, template_data):
     return final_json
 
 # ================= 主界面展示 =================
-st.title("🎯 IATF 审计数据转换工具 (v20.1 缩进修复版)")
+st.title("🎯 IATF 审计数据转换工具 (v21.0)")
 st.markdown(f"**当前套用模板**：`{template_name}`")
 
 uploaded_files = st.file_uploader("📥 上传 Excel 数据表", type=["xlsx"], accept_multiple_files=True)
@@ -316,6 +348,7 @@ if uploaded_files:
                     st.download_button("📥 下载生成后的 JSON", data=json.dumps(res_json, indent=2, ensure_ascii=False), file_name=file.name.replace(".xlsx", ".json"), key=f"dl_{file.name}")
         except Exception as e:
             st.error(f"❌ {file.name} 处理失败: {str(e)}")
+
 
 
 
