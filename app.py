@@ -8,231 +8,183 @@ import copy
 import re
 from datetime import datetime, timedelta
 
-# --- 页面配置 ---
-st.set_page_config(
-    page_title="IATF 审计转换工具 (v26.0)",
-    page_icon="🎯",
-    layout="wide"
-)
+st.set_page_config(page_title="IATF 审计转换工具 (v27.0)", page_icon="🎯", layout="wide")
 
-# --- 1. 侧边栏：强制要求导入用户自己的 JSON 模板 ---
+# --- 1. 侧边栏：强制要求上传模板 ---
 with st.sidebar:
     st.header("⚙️ 模板配置")
-    st.warning("⚠️ 必须上传您的 JSON 模板。程序不再提供默认模板。")
+    st.warning("⚠️ 必须上传 JSON 模板。程序将用生成的内容替换模板中的匹配条目。")
     user_template = st.file_uploader("上传自定义 JSON 模板", type=["json"])
     
     active_template = None
-    template_name = ""
-
     if user_template:
         try:
             active_template = json.load(user_template)
-            template_name = user_template.name
-            st.success(f"✅ 成功加载模板: {template_name}")
+            st.success(f"✅ 成功加载模板: {user_template.name}")
         except Exception as e:
             st.error(f"❌ 模板解析失败: {e}")
             st.stop()
     else:
-        # 如果用户没有导入模板，程序阻断运行
-        st.info("请先在左侧上传 JSON 模板文件。")
         st.stop()
 
-# --- 辅助函数：安全更新深层节点，保留未提及的兄弟字段 ---
-def ensure_path(d, path):
-    current = d
-    for key in path:
-        if key not in current or not isinstance(current[key], dict):
-            current[key] = {}
-        current = current[key]
-    return current
+# --- 2. 深度替换函数：对于相同的条目，用 source 替换 target ---
+def deep_patch_replace(target, source):
+    """
+    递归遍历：如果 source 中的路径在 target 中也存在，则替换 target 的值。
+    """
+    if isinstance(target, dict) and isinstance(source, dict):
+        for key in source.keys():
+            if key in target:
+                if isinstance(source[key], dict) and isinstance(target[key], dict):
+                    deep_patch_replace(target[key], source[key])
+                elif isinstance(source[key], list) and isinstance(target[key], list):
+                    # 对于列表（如团队、过程），通常业务上以数据表为准，直接替换匹配索引
+                    for i in range(min(len(target[key]), len(source[key]))):
+                        if isinstance(target[key][i], (dict, list)) and isinstance(source[key][i], (dict, list)):
+                            deep_patch_replace(target[key][i], source[key][i])
+                        else:
+                            target[key][i] = copy.deepcopy(source[key][i])
+                    # 如果生成的列表更长，追加剩余部分
+                    if len(source[key]) > len(target[key]):
+                        target[key].extend(copy.deepcopy(source[key][len(target[key]):]))
+                else:
+                    target[key] = copy.deepcopy(source[key])
+    return target
 
-# --- 核心转换逻辑 ---
-def generate_json_logic(excel_file, template_data):
-    # 深度拷贝用户导入的底稿：只替换提及部分，其余全部保留
-    final_json = copy.deepcopy(template_data)
+# --- 3. 核心业务提取逻辑 (生成默认内容) ---
+def generate_default_content(excel_file):
+    xls = pd.ExcelFile(excel_file)
+    db_df = pd.read_excel(xls, sheet_name='数据库', header=None) if '数据库' in xls.sheet_names else pd.read_excel(xls, sheet_name=0, header=None)
+    proc_df = pd.read_excel(xls, sheet_name='过程清单') if '过程清单' in xls.sheet_names else pd.DataFrame()
+    info_df = pd.read_excel(xls, sheet_name='信息', header=None) if '信息' in xls.sheet_names else pd.DataFrame()
     
-    try:
-        xls = pd.ExcelFile(excel_file)
-        # 读取约定的四张表
-        db_df = pd.read_excel(xls, sheet_name='数据库', header=None) if '数据库' in xls.sheet_names else pd.read_excel(xls, sheet_name=0, header=None)
-        proc_df = pd.read_excel(xls, sheet_name='过程清单') if '过程清单' in xls.sheet_names else pd.DataFrame()
-        info_df = pd.read_excel(xls, sheet_name='信息', header=None) if '信息' in xls.sheet_names else pd.DataFrame()
-        
-        # 提取第九张子表 (文件清单)
-        doc_list_df = pd.DataFrame()
-        if len(xls.sheet_names) >= 9:
-            doc_list_df = pd.read_excel(xls, sheet_name=xls.sheet_names[8], header=None)
-    except Exception as e:
-        raise ValueError(f"Excel 读取失败: {str(e)}")
+    doc_list_df = pd.DataFrame()
+    if len(xls.sheet_names) >= 9:
+        doc_list_df = pd.read_excel(xls, sheet_name=xls.sheet_names[8], header=None)
 
-    def find_val_by_key(df, keywords, col_offset=1):
+    def find_val(df, keywords, offset=1):
         if df.empty: return ""
         for r in range(df.shape[0]):
             for c in range(df.shape[1]):
-                cell_val = str(df.iloc[r, c]).strip()
-                for k in keywords:
-                    if k in cell_val:
-                        if c + col_offset < df.shape[1]:
-                            return str(df.iloc[r, c + col_offset]).strip()
+                if any(k in str(df.iloc[r, c]) for k in keywords):
+                    return str(df.iloc[r, c + offset]).strip() if c + offset < df.shape[1] else ""
         return ""
 
-    # --- 数据提取 ---
-    # 姓名提取与重排
-    raw_name_full = find_val_by_key(db_df, ["姓名", "Auditor Name"])
-    raw_name = raw_name_full.replace("姓名:", "").replace("Name:", "").strip() if raw_name_full else ""
-    auditor_name = raw_name
-    english_part = re.sub(r'[\u4e00-\u9fff]', '', raw_name).strip()
-    if english_part:
-        parts = english_part.split()
-        if len(parts) >= 2 and parts[0].isupper() and not parts[1].isupper():
-            auditor_name = f"{parts[1]} {parts[0]}"
-        else:
-            auditor_name = english_part
+    # (A) 姓名重排
+    raw_name = find_val(db_df, ["姓名", "Auditor Name"]).replace("姓名:", "").replace("Name:", "").strip()
+    aud_name = raw_name
+    en_part = re.sub(r'[\u4e00-\u9fff]', '', raw_name).strip()
+    if en_part:
+        pts = en_part.split()
+        aud_name = f"{pts[1]} {pts[0]}" if len(pts) >= 2 and pts[0].isupper() and not pts[1].isupper() else en_part
 
-    # IATF ID (AuditorId) 提取
-    auditor_id = ""
-    if not info_df.empty:
-        for r in range(info_df.shape[0]):
-            for c in range(info_df.shape[1]):
-                if "IATF Card" in str(info_df.iloc[r, c]):
-                    if c + 1 < info_df.shape[1]:
-                        raw_val = str(info_df.iloc[r, c + 1]).strip().replace('\n', ' ')
-                        auditor_id = re.sub(r'^IATF[:：\s-]*', '', raw_val, flags=re.IGNORECASE).strip()
-                        if len(auditor_id) > 4: break
-            if auditor_id: break
+    # (B) IATF ID
+    aud_id = ""
+    for r in range(info_df.shape[0]):
+        for c in range(info_df.shape[1]):
+            if "IATF Card" in str(info_df.iloc[r, c]):
+                rv = str(info_df.iloc[r, c+1]).strip().replace('\n', ' ')
+                aud_id = re.sub(r'^IATF[:：\s-]*', '', rv, flags=re.IGNORECASE).strip()
+                if len(aud_id) > 4: break
+        if aud_id: break
 
-    # 日期处理 (要求：审核开始日期 / 审核结束日期)
-    start_date_raw = find_val_by_key(db_df, ["审核开始日期"])
-    end_date_raw = find_val_by_key(db_df, ["审核结束日期"])
-    def fmt_iso(val):
-        try:
-            dt = pd.to_datetime(val, errors='coerce')
-            if pd.notna(dt): return dt.strftime('%Y-%m-%d') + "T00:00:00.000Z"
-        except: pass
-        return ""
-    start_iso, end_iso = fmt_iso(start_date_raw), fmt_iso(end_date_raw)
-    
-    # 下次审核日期 (+45天)
-    next_audit_iso = ""
-    try:
-        end_dt = pd.to_datetime(end_date_raw, errors='coerce')
-        if pd.notna(end_dt):
-            next_audit_iso = (end_dt + timedelta(days=45)).strftime('%Y-%m-%d') + "T00:00:00.000Z"
-    except: pass
+    # (C) 日期与 +45天
+    s_iso = fmt_iso = lambda v: pd.to_datetime(v, errors='coerce').strftime('%Y-%m-%d') + "T00:00:00.000Z" if pd.notna(pd.to_datetime(v, errors='coerce')) else ""
+    start_iso = fmt_iso(find_val(db_df, ["审核开始日期"]))
+    end_iso = fmt_iso(find_val(db_df, ["审核结束日期"]))
+    next_iso = (pd.to_datetime(find_val(db_df, ["审核结束日期"])) + timedelta(days=45)).strftime('%Y-%m-%d') + "T00:00:00.000Z" if start_iso else ""
 
-    # 地址切分逻辑
-    en_state, en_city, en_country, en_street1 = "", "", "", ""
-    en_addr_raw = ""
-    if not info_df.empty:
-        for r in range(info_df.shape[0]):
-            for c in range(info_df.shape[1]):
-                val = str(info_df.iloc[r, c]).strip()
-                if "审核地址" in val or "Address" in val:
-                    if c + 1 < info_df.shape[1]:
-                        rv = str(info_df.iloc[r, c+1]).strip()
-                        if re.search(r'[a-zA-Z]', rv):
-                            en_addr_raw = rv.replace('\n', ' ')
-                            break
-            if en_addr_raw: break
-
-    if en_addr_raw:
-        parts = [p.strip() for p in en_addr_raw.replace('，', ',').split(',') if p.strip()]
-        en_parts = [re.sub(r'[\u4e00-\u9fff]', '', p).strip() for p in parts if re.search(r'[a-zA-Z]', p)]
-        if en_parts:
-            en_country = en_parts.pop(-1)
+    # (D) 地址智能拆分
+    e_state, e_city, e_country, e_street = "", "", "", ""
+    ea_raw = ""
+    for r in range(info_df.shape[0]):
+        for c in range(info_df.shape[1]):
+            if "审核地址" in str(info_df.iloc[r, c]) and re.search(r'[a-zA-Z]', str(info_df.iloc[r, c+1])):
+                ea_raw = str(info_df.iloc[r, c+1]).strip().replace('\n', ' ')
+                break
+    if ea_raw:
+        pts = [re.sub(r'[\u4e00-\u9fff]', '', p).strip() for p in ea_raw.replace('，', ',').split(',') if re.search(r'[a-zA-Z]', p)]
+        if pts:
+            e_country = pts.pop(-1)
             streets = []
-            for p in en_parts:
-                if "PROVINCE" in p.upper(): en_state = p
-                elif "CITY" in p.upper(): en_city = p
+            for p in pts:
+                if "PROVINCE" in p.upper(): e_state = p
+                elif "CITY" in p.upper(): e_city = p
                 else: streets.append(p)
-            en_street1 = ", ".join(streets)
+            e_street = ", ".join(streets)
 
-    # ================= 2. 定点替换逻辑 (仅替换提及字段) =================
-
-    # 全局 UUID 与 时间戳
-    final_json["uuid"] = str(uuid.uuid4())
-    final_json["created"] = int(time.time() * 1000)
-
-    # A. 审核数据定点替换 (要求路径：AuditData -> AuditData -> start/end)
-    ensure_path(final_json, ["AuditData", "AuditData"])
-    final_json["AuditData"]["AuditData"]["start"] = start_iso
-    final_json["AuditData"]["AuditData"]["end"] = end_iso
+    # (E) 构建默认生成的 JSON 内容 (Source)
+    generated = {
+        "uuid": str(uuid.uuid4()),
+        "created": int(time.time() * 1000),
+        "AuditData": {
+            "AuditData": {"start": start_iso, "end": end_iso}, #
+            "CbIdentificationNo": find_val(db_df, ["认证机构标识号"]), #
+            "AuditTeam": [{"Name": aud_name, "AuditorId": aud_id, "AuditDaysPerformed": 1.5}]
+        },
+        "OrganizationInformation": {
+            "TotalNumberEmployees": find_val(db_df, ["包括扩展现场在内的员工总数"]),
+            "CertificateScope": find_val(db_df, ["证书范围"]),
+            "Address": {"State": e_state, "City": e_city, "Country": e_country, "Street1": e_street, "PostalCode": find_val(db_df, ["邮政编码"])},
+            "AddressNative": {"Street1": find_val(db_df, ["街道1"]), "Country": "中国", "PostalCode": find_val(db_df, ["邮政编码"])}
+        },
+        "Results": {
+            "AuditReportFinal": {"Date": end_iso},
+            "DateNextScheduledAudit": next_iso
+        }
+    }
     
-    # 要求：CbIdentificationNo 对应 认证机构标识号
-    final_json["AuditData"]["CbIdentificationNo"] = find_val_by_key(db_df, ["认证机构标识号"])
+    # 填充文件清单
+    docs = []
+    for c in range(doc_list_df.shape[1]):
+        for r in range(doc_list_df.shape[0]):
+            if "公司内对应的程序文件" in str(doc_list_df.iloc[r, c]):
+                for r2 in range(r+1, doc_list_df.shape[0]):
+                    v = str(doc_list_df.iloc[r2, c]).strip()
+                    if v and v.lower() != 'nan': docs.append({"DocumentName": v})
+                break
+    generated["Stage1DocumentedRequirements"] = {"IatfClauseDocuments": docs}
 
-    # 团队信息
-    if "AuditTeam" in final_json["AuditData"] and len(final_json["AuditData"]["AuditTeam"]) > 0:
-        team = final_json["AuditData"]["AuditTeam"][0]
-        team.update({
-            "Name": auditor_name,
-            "AuditorId": auditor_id,
-            "AuditDaysPerformed": 1.5,
-            "DatesOnSite": [{"Date": start_iso, "Day": 1}, {"Date": end_iso, "Day": 0.5}]
-        })
-
-    # B. 地址信息定点替换
-    ensure_path(final_json, ["OrganizationInformation", "Address"])
-    org_addr = final_json["OrganizationInformation"]["Address"]
-    org_addr.update({"State": en_state, "City": en_city, "Country": en_country, "Street1": en_street1})
-    org_addr["PostalCode"] = find_val_by_key(db_df, ["邮政编码"])
-
-    # C. 组织信息
-    org_info = final_json["OrganizationInformation"]
-    org_info["TotalNumberEmployees"] = find_val_by_key(db_df, ["包括扩展现场在内的员工总数"])
-    org_info["CertificateScope"] = find_val_by_key(db_df, ["证书范围"])
-
-    # D. 过程清单 (每一部分 AuditNotes 加上制造/现场/远程标记)
-    processes = []
+    # 填充过程清单
+    procs = []
     if not proc_df.empty:
-        clause_cols = proc_df.columns[13:] if proc_df.shape[1] > 13 else []
-        for idx, row in proc_df.iterrows():
-            p_name = str(row.iloc[12]).strip()
-            if not p_name or p_name.lower() == 'nan': continue
-            proc_obj = {
-                "Id": str(uuid.uuid4()),
-                "ProcessName": p_name,
-                "AuditNotes": [{
-                    "Id": str(uuid.uuid4()),
-                    "AuditorId": auditor_id,
-                    "ManufacturingProcess": "0",
-                    "OnSiteProcess": "1",
-                    "RemoteProcess": "0"
-                }]
-            }
-            for col in clause_cols:
-                if str(row[col]).strip().upper() in ['X', 'TRUE']: proc_obj[col] = True
-            processes.append(proc_obj)
-    final_json["Processes"] = processes
+        cols = proc_df.columns[13:]
+        for i, row in proc_df.iterrows():
+            if str(row.iloc[12]).strip().lower() in ['', 'nan']: continue
+            p_obj = {"Id": str(uuid.uuid4()), "ProcessName": str(row.iloc[12]), "AuditNotes": [{"Id": str(uuid.uuid4()), "AuditorId": aud_id, "ManufacturingProcess": "0", "OnSiteProcess": "1", "RemoteProcess": "0"}]}
+            for col in cols:
+                if str(row[col]).strip().upper() in ['X', 'TRUE']: p_obj[col] = True
+            procs.append(p_obj)
+    generated["Processes"] = procs
 
-    # E. 结果日期
-    ensure_path(final_json, ["Results", "AuditReportFinal"])
-    final_json["Results"]["AuditReportFinal"]["Date"] = end_iso
-    final_json["Results"]["DateNextScheduledAudit"] = next_audit_iso
+    return generated
 
-    return final_json
+# --- 4. 主界面 ---
+st.title("🚀 IATF 审计数据深度补丁转换引擎 (v27.0)")
+st.write(f"当前合并底稿：**{user_template.name}**")
 
-# ================= 主界面 =================
-st.title("🚀 多模板审计转换引擎 (v26.0)")
-st.write(f"当前生效模板：**{template_name}**")
+files = st.file_uploader("📥 上传 Excel 数据表", type=["xlsx"], accept_multiple_files=True)
 
-uploaded_files = st.file_uploader("📥 上传 Excel 数据表", type=["xlsx"], accept_multiple_files=True)
-
-if uploaded_files:
+if files:
     st.divider()
-    for file in uploaded_files:
+    for f in files:
         try:
-            res_json = generate_json_logic(file, active_template)
-            st.success(f"✅ {file.name} 转换成功")
-            st.download_button(
-                label=f"📥 下载 JSON ({file.name})",
-                data=json.dumps(res_json, indent=2, ensure_ascii=False),
-                file_name=file.name.replace(".xlsx", ".json"),
-                key=f"dl_{file.name}"
-            )
-        except Exception as e:
-            st.error(f"❌ {file.name} 处理失败: {str(e)}")
+            # 1. 先生成默认内容
+            generated_content = generate_default_content(f)
+            # 2. 将上传的模板作为 target，进行深度合并替换
+            final_output = deep_patch_replace(copy.deepcopy(active_template), generated_content)
             
+            with st.expander(f"📄 {f.name} - 合并成功", expanded=True):
+                col1, col2 = st.columns([3, 1])
+                with col1:
+                    st.success("已完成深度替换")
+                    team = generated_content["AuditData"]["AuditTeam"][0]
+                    st.code(f"姓名: {team['Name']} | ID: {team['AuditorId']}", language="yaml")
+                with col2:
+                    st.download_button("📥 下载 JSON", data=json.dumps(final_output, indent=2, ensure_ascii=False), file_name=f.name.replace(".xlsx", ".json"), key=f"dl_{f.name}")
+        except Exception as e:
+            st.error(f"❌ {f.name} 处理失败: {str(e)}")
+
 
 
 
