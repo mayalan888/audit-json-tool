@@ -8,7 +8,7 @@ import copy
 import re
 from datetime import datetime, timedelta
 
-st.set_page_config(page_title="IATF 审计转换工具 (v18.0)", page_icon="🎯", layout="wide")
+st.set_page_config(page_title="IATF 审计转换工具 (v19.0)", page_icon="🎯", layout="wide")
 
 # ================= UI：强制要求上传模板 =================
 with st.sidebar:
@@ -28,7 +28,7 @@ with st.sidebar:
             st.error(f"❌ 模板解析失败: {e}")
             st.stop()
     else:
-        st.stop() # 如果没有上传模板，程序强制停止
+        st.stop()
 
 # --- 辅助函数：安全更新深层节点 ---
 def ensure_path(d, path):
@@ -41,7 +41,6 @@ def ensure_path(d, path):
 
 # --- 核心数据转换逻辑 ---
 def generate_json_logic(excel_file, template_data):
-    # 深度拷贝模板，绝不作任何覆盖或删改
     final_json = copy.deepcopy(template_data)
     
     try:
@@ -123,6 +122,7 @@ def generate_json_logic(excel_file, template_data):
             next_audit_iso = next_dt.strftime('%Y-%m-%d') + "T00:00:00.000Z"
     except: pass
 
+    # (C) 业务字段提取
     zh_addr = ""
     addr_candidates = []
     if not db_df.empty:
@@ -145,6 +145,32 @@ def generate_json_logic(excel_file, template_data):
     csr_name = find_val_by_key(db_df, ["CSR文件名称"])
     csr_date = fmt_iso(find_val_by_key(db_df, ["CSR文件日期"]))
 
+    # 💥 (D) 审核地址智能拆分 (从 "信息" 表提取英文地址)
+    en_state, en_city, en_country, en_street1 = "", "", "", ""
+    audit_address_raw = find_val_by_key(info_df, ["审核地址"])
+    if audit_address_raw:
+        # 兼容中文逗号，替换为标准英文逗号进行分割
+        address_str = audit_address_raw.replace('，', ',')
+        parts = [p.strip() for p in address_str.split(',') if p.strip()]
+        
+        if parts:
+            # 1. 最后一个逗号后的部分为 Country
+            en_country = parts.pop(-1)
+            
+            street_parts = []
+            # 2. 遍历剩下的部分，寻找 State 和 City
+            for p in parts:
+                p_upper = p.upper()
+                if "PROVINCE" in p_upper:
+                    en_state = p
+                elif "CITY" in p_upper:
+                    en_city = p
+                else:
+                    # 3. 剩下的全都是 Street1
+                    street_parts.append(p)
+            
+            en_street1 = ", ".join(street_parts)
+
     # ================= 2. 定点替换逻辑 =================
 
     final_json["uuid"] = str(uuid.uuid4())
@@ -154,8 +180,6 @@ def generate_json_logic(excel_file, template_data):
     ensure_path(final_json, ["AuditData", "AuditDate"])
     final_json["AuditData"]["AuditDate"]["Start"] = start_iso
     final_json["AuditData"]["AuditDate"]["End"] = end_iso
-    
-    # 💥 已修正：精确搜索 "认证机构标识号"
     final_json["AuditData"]["CbIdentificationNo"] = find_val_by_key(db_df, ["认证机构标识号", "认证机构识别号"])
 
     if "AuditTeam" not in final_json["AuditData"] or not isinstance(final_json["AuditData"]["AuditTeam"], list):
@@ -172,15 +196,23 @@ def generate_json_logic(excel_file, template_data):
 
     # B. 组织信息定点替换
     ensure_path(final_json, ["OrganizationInformation", "AddressNative"])
+    ensure_path(final_json, ["OrganizationInformation", "Address"])
     org = final_json["OrganizationInformation"]
     org["OrganizationName"] = find_val_by_key(db_df, ["组织名称"])
     org["IATF_USI"] = find_val_by_key(db_df, ["IATF USI"])
     org["TotalNumberEmployees"] = total_employees
     org["CertificateScope"] = certificate_scope
     
+    # 中文地址映射
     org["AddressNative"]["Street1"] = zh_addr
     org["AddressNative"]["PostalCode"] = postal_code
     org["AddressNative"]["Country"] = "中国"
+    
+    # 英文地址映射 (来自信息表)
+    org["Address"]["State"] = en_state
+    org["Address"]["City"] = en_city
+    org["Address"]["Country"] = en_country
+    org["Address"]["Street1"] = en_street1
 
     # C. 顾客与 CSR 定点替换
     ensure_path(final_json, ["CustomerInformation"])
@@ -265,7 +297,7 @@ def generate_json_logic(excel_file, template_data):
     return final_json
 
 # ================= 主界面展示 =================
-st.title("🎯 IATF 审计数据转换工具 (v18.0)")
+st.title("🎯 IATF 审计数据转换工具 (v19.0)")
 st.markdown(f"**当前套用模板**：`{template_name}`")
 
 uploaded_files = st.file_uploader("📥 上传 Excel 数据表", type=["xlsx"], accept_multiple_files=True)
@@ -286,5 +318,6 @@ if uploaded_files:
                     st.download_button("📥 下载生成后的 JSON", data=json.dumps(res_json, indent=2, ensure_ascii=False), file_name=file.name.replace(".xlsx", ".json"), key=f"dl_{file.name}")
         except Exception as e:
             st.error(f"❌ {file.name} 处理失败: {str(e)}")
+
 
 
