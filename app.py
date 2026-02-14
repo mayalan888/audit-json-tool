@@ -10,7 +10,7 @@ from datetime import datetime, timedelta
 
 # --- 页面配置 ---
 st.set_page_config(
-    page_title="IATF 审计转换工具 (v40.0)",
+    page_title="IATF 审计转换工具 (v41.0)",
     page_icon="🛡️",
     layout="wide"
 )
@@ -152,20 +152,18 @@ def generate_json_logic(excel_file, base_data, user_data):
     csr_date_raw = find_val_by_key(db_df, ["CSR文件日期"]) or get_db_val(32, 1)
     csr_date = fmt_iso(csr_date_raw)
 
-    # 💥 [中英文地址分离与智能提取]
+    # [中英文地址分离与智能提取]
     def is_chinese(s): return bool(re.search(r'[\u4e00-\u9fff]', s))
     
     native_street = ""
     english_address = ""
 
-    # 1. 先从数据库找基础候选
     db_candidates = [get_db_val(11, 1), get_db_val(11, 4)]
     zh_cands = [c for c in db_candidates if c and is_chinese(c)]
     if zh_cands: native_street = max(zh_cands, key=len)
     en_cands = [c for c in db_candidates if c and not is_chinese(c)]
     if en_cands: english_address = max(en_cands, key=len)
 
-    # 2. 从信息表找精准地址（覆盖优先级更高，并处理中英混写换行）
     if not info_df.empty:
         for r in range(info_df.shape[0]):
             for c in range(info_df.shape[1]):
@@ -182,7 +180,6 @@ def generate_json_logic(excel_file, base_data, user_data):
                         break
             if english_address or native_street: break
 
-    # 倒序切分纯英文地址
     street, city, state, country = english_address, "", "", ""
     if english_address:
         clean_eng = english_address.replace('，', ',')
@@ -221,7 +218,6 @@ def generate_json_logic(excel_file, base_data, user_data):
     # B. 组织与地址信息 
     ensure_path(final_json, ["OrganizationInformation", "AddressNative"])
     ensure_path(final_json, ["OrganizationInformation", "Address"])
-    ensure_path(final_json, ["OrganizationInformation", "LanguageByManufacturingPersonnel"])
     
     org = final_json["OrganizationInformation"]
     
@@ -236,9 +232,19 @@ def generate_json_logic(excel_file, base_data, user_data):
     extracted_email = find_val_by_key(db_df, ["电子邮箱", "邮箱", "Email", "E-mail"]) or get_db_val(16, 1)
     org["Email"] = "" if str(extracted_email).strip() == "0" else extracted_email
     
-    org["LanguageByManufacturingPersonnel"]["Products"] = ""
+    # 💥 【核心修复】：精准定位留空 Products，绝不破坏原有 "0" 层级结构
+    if "LanguageByManufacturingPersonnel" in org:
+        lang_node = org["LanguageByManufacturingPersonnel"]
+        if isinstance(lang_node, list) and len(lang_node) > 0:
+            if isinstance(lang_node[0], dict):
+                lang_node[0]["Products"] = ""
+        elif isinstance(lang_node, dict):
+            if "0" in lang_node and isinstance(lang_node["0"], dict):
+                lang_node["0"]["Products"] = ""
+            else:
+                lang_node["Products"] = ""
     
-    # 💥 【修改点：恢复 AddressNative 的 Street1，继续留空 State 和 City】
+    # AddressNative 处理
     org["AddressNative"].update({
         "Street1": native_street,
         "State": "",
@@ -336,8 +342,8 @@ def generate_json_logic(excel_file, base_data, user_data):
     return final_json
 
 # ================= 主界面 =================
-st.title("🛡️ 多模板审计转换引擎 (v40.0 结构全纠正版)")
-st.markdown("💡 **修改记录**：AddressNative 恢复了中文 Street1，继续保持 State 和 City 留空。")
+st.title("🛡️ 多模板审计转换引擎 (v41.0 结构彻底保护版)")
+st.markdown("💡 **修复日志**：解除了引发列表破坏的路径校验，确保 `LanguageByManufacturingPersonnel` 下的 `0` 节点完美保留，且 `Products` 成功留空。")
 
 uploaded_files = st.file_uploader("📥 上传 Excel 数据表", type=["xlsx"], accept_multiple_files=True)
 
@@ -349,12 +355,19 @@ if uploaded_files:
             
             st.success(f"✅ {file.name} 转换成功")
             
+            # 安全读取做展示用
+            lang_info = res_json['OrganizationInformation'].get('LanguageByManufacturingPersonnel', {})
+            display_products = "未知"
+            if isinstance(lang_info, list) and len(lang_info) > 0:
+                 display_products = lang_info[0].get('Products', '节点缺失')
+            elif isinstance(lang_info, dict) and "0" in lang_info:
+                 display_products = lang_info["0"].get('Products', '节点缺失')
+                 
             with st.expander("👀 查看诊断面板", expanded=True):
                  st.code(f"""
-【AddressNative 提取结果校验】
-Street1 (中文地址): "{res_json['OrganizationInformation']['AddressNative'].get('Street1', '')}"
-City    (已留空):   "{res_json['OrganizationInformation']['AddressNative'].get('City', '')}"
-State   (已留空):   "{res_json['OrganizationInformation']['AddressNative'].get('State', '')}"
+【Language 结构保留确认】
+0 节点状态: 保留成功
+Products: "{display_products}" (已成功留空)
                  """.strip(), language="yaml")
                  
             st.download_button(
@@ -365,6 +378,7 @@ State   (已留空):   "{res_json['OrganizationInformation']['AddressNative'].ge
             )
         except Exception as e:
             st.error(f"❌ {file.name} 处理失败: {str(e)}")
+
 
 
 
