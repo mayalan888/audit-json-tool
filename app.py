@@ -10,7 +10,7 @@ from datetime import datetime, timedelta
 
 # --- 页面配置 ---
 st.set_page_config(
-    page_title="IATF 审计转换工具 (v43.0)",
+    page_title="IATF 审计转换工具 (v44.0)",
     page_icon="🛡️",
     layout="wide"
 )
@@ -56,7 +56,6 @@ def ensure_path(d, path):
         current = current[key]
     return current
 
-# UI 专用的安全读取器，防止字符串调用 .get 报错
 def safe_get(obj, key, default=""):
     if isinstance(obj, dict):
         return obj.get(key, default)
@@ -157,18 +156,13 @@ def generate_json_logic(excel_file, base_data, user_data):
     csr_date_raw = find_val_by_key(db_df, ["CSR文件日期"]) or get_db_val(32, 1)
     csr_date = fmt_iso(csr_date_raw)
 
-    # [中英文地址分离与智能提取]
+    # 💥 [中英文地址分离与智能提取（破案修复版）]
     def is_chinese(s): return bool(re.search(r'[\u4e00-\u9fff]', s))
     
     native_street = ""
     english_address = ""
 
-    db_candidates = [get_db_val(11, 1), get_db_val(11, 4)]
-    zh_cands = [c for c in db_candidates if c and is_chinese(c)]
-    if zh_cands: native_street = max(zh_cands, key=len)
-    en_cands = [c for c in db_candidates if c and not is_chinese(c)]
-    if en_cands: english_address = max(en_cands, key=len)
-
+    # 1. 优先扫描信息表（不会被其他变量干扰提前中断）
     if not info_df.empty:
         for r in range(info_df.shape[0]):
             for c in range(info_df.shape[1]):
@@ -183,8 +177,16 @@ def generate_json_logic(excel_file, base_data, user_data):
                             if en_lines: english_address = " ".join(en_lines)
                             if zh_lines: native_street = " ".join(zh_lines)
                         break
-            if english_address or native_street: break
 
+    # 2. 如果信息表里没找到，再去数据库兜底
+    if not native_street or not english_address:
+        db_candidates = [get_db_val(11, 1), get_db_val(11, 4)]
+        zh_cands = [c for c in db_candidates if c and is_chinese(c)]
+        en_cands = [c for c in db_candidates if c and not is_chinese(c)]
+        if not native_street and zh_cands: native_street = max(zh_cands, key=len)
+        if not english_address and en_cands: english_address = max(en_cands, key=len)
+
+    # 倒序切分
     street, city, state, country = english_address, "", "", ""
     if english_address:
         clean_eng = english_address.replace('，', ',')
@@ -316,9 +318,7 @@ def generate_json_logic(excel_file, base_data, user_data):
     if not proc_df.empty:
         clause_cols = proc_df.columns[13:] if proc_df.shape[1] > 13 else []
         for idx, row in proc_df.iterrows():
-            # 💥 【修改点】：ProcessName 改为从 A 列 (索引 0) 提取
             p_name = str(row.iloc[0]).strip()
-            
             rep_name = str(row.iloc[2]).strip() if pd.notna(row.iloc[2]) else ""
             
             if not p_name or p_name.lower() == 'nan': continue
@@ -349,8 +349,8 @@ def generate_json_logic(excel_file, base_data, user_data):
     return final_json
 
 # ================= 主界面 =================
-st.title("🛡️ 多模板审计转换引擎 (v43.0 A列提取版)")
-st.markdown("💡 **修改日志**：`ProcessName` 已更新为从【过程清单】的 **A列 (第一列)** 提取。")
+st.title("🛡️ 多模板审计转换引擎 (v44.0 地址防短路版)")
+st.markdown("💡 **修复日志**：去除了导致英文地址读取提前短路中断的 BUG 代码，现在英文 Address 节点将完美生成。")
 
 uploaded_files = st.file_uploader("📥 上传 Excel 数据表", type=["xlsx"], accept_multiple_files=True)
 
@@ -361,19 +361,14 @@ if uploaded_files:
             res_json = generate_json_logic(file, base_template, user_template_data)
             st.success(f"✅ {file.name} 转换成功")
             
-            try:
-                # 安全抽取用于展示的第一条过程记录
-                sample_proc = {}
-                if "Processes" in res_json and len(res_json["Processes"]) > 0:
-                    sample_proc = res_json["Processes"][0]
-                     
-                with st.expander("👀 查看过程清单诊断面板", expanded=True):
-                     st.code(f"""
-【过程清单第一条提取预览 (来自 A 列)】
-ProcessName: "{safe_get(sample_proc, 'ProcessName', '缺失')}"
-                     """.strip(), language="yaml")
-            except Exception:
-                pass
+            with st.expander("👀 查看诊断面板", expanded=True):
+                 st.code(f"""
+【英文 Address 完美切分确认】
+Street1: "{safe_get(res_json['OrganizationInformation']['Address'], 'Street1')}"
+City:    "{safe_get(res_json['OrganizationInformation']['Address'], 'City')}"
+State:   "{safe_get(res_json['OrganizationInformation']['Address'], 'State')}"
+Country: "{safe_get(res_json['OrganizationInformation']['Address'], 'Country')}"
+                 """.strip(), language="yaml")
 
             st.download_button(
                 label=f"📥 下载 JSON ({file.name})",
