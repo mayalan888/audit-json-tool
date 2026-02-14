@@ -10,7 +10,7 @@ from datetime import datetime, timedelta
 
 # --- 页面配置 ---
 st.set_page_config(
-    page_title="IATF 审计转换工具 (v38.0)",
+    page_title="IATF 审计转换工具 (v39.0)",
     page_icon="🛡️",
     layout="wide"
 )
@@ -61,10 +61,8 @@ def ensure_path(d, path):
 # --- 核心转换逻辑 ---
 def generate_json_logic(excel_file, base_data, user_data):
     # 💥 1. 模板靶向融合逻辑
-    # 先完整拷贝金磁.json作为基础骨架
     final_json = copy.deepcopy(base_data)
     
-    # 然后用用户上传的模板去“覆盖”那三个特定节点
     for key in ["Stage1Activities", "Stage1Part1", "Stage1Part2"]:
         if key in user_data:
             final_json[key] = copy.deepcopy(user_data[key])
@@ -190,10 +188,10 @@ def generate_json_logic(excel_file, base_data, user_data):
     final_json["uuid"] = str(uuid.uuid4())
     final_json["created"] = int(time.time() * 1000)
 
-    # A. 审核数据
-    ensure_path(final_json, ["AuditData", "AuditData"])
-    if start_iso: final_json["AuditData"]["AuditData"]["start"] = start_iso
-    if end_iso: final_json["AuditData"]["AuditData"]["end"] = end_iso
+    # 💥 A. 审核数据：修正为 AuditDate -> Start / End
+    ensure_path(final_json, ["AuditData", "AuditDate"])
+    if start_iso: final_json["AuditData"]["AuditDate"]["Start"] = start_iso
+    if end_iso: final_json["AuditData"]["AuditDate"]["End"] = end_iso
     final_json["AuditData"]["CbIdentificationNo"] = find_val_by_key(db_df, ["认证机构标识号"]) or get_db_val(2, 4)
 
     if "AuditTeam" not in final_json["AuditData"] or not final_json["AuditData"]["AuditTeam"]:
@@ -211,7 +209,6 @@ def generate_json_logic(excel_file, base_data, user_data):
     # B. 组织与地址信息 
     ensure_path(final_json, ["OrganizationInformation", "AddressNative"])
     ensure_path(final_json, ["OrganizationInformation", "Address"])
-    # 💥 新增安全路径，确保 LanguageByManufacturingPersonnel 存在
     ensure_path(final_json, ["OrganizationInformation", "LanguageByManufacturingPersonnel"])
     
     org = final_json["OrganizationInformation"]
@@ -227,7 +224,7 @@ def generate_json_logic(excel_file, base_data, user_data):
     extracted_email = find_val_by_key(db_df, ["电子邮箱", "邮箱", "Email", "E-mail"]) or get_db_val(16, 1)
     org["Email"] = "" if str(extracted_email).strip() == "0" else extracted_email
     
-    # 💥 【修改点】：强制留空 Products
+    # 强制留空 Products
     org["LanguageByManufacturingPersonnel"]["Products"] = ""
     
     # AddressNative 留空
@@ -292,22 +289,27 @@ def generate_json_logic(excel_file, base_data, user_data):
             else:
                 clause_docs.append({"DocumentName": doc_name})
 
-    # E. 过程清单重建
+    # 💥 E. 过程清单重建 (将业务标记移至根层级，新增 RepresentativeName)
     processes = []
     if not proc_df.empty:
         clause_cols = proc_df.columns[13:] if proc_df.shape[1] > 13 else []
         for idx, row in proc_df.iterrows():
             p_name = str(row.iloc[12]).strip()
+            
+            # 提取代表名称，坐标为第3列 (iloc[2])
+            rep_name = str(row.iloc[2]).strip() if pd.notna(row.iloc[2]) else ""
+            
             if not p_name or p_name.lower() == 'nan': continue
             proc_obj = {
                 "Id": str(uuid.uuid4()),
                 "ProcessName": p_name,
+                "RepresentativeName": rep_name,  # 新增字段
+                "ManufacturingProcess": "0",     # 移至根目录
+                "OnSiteProcess": "1",            # 移至根目录
+                "RemoteProcess": "0",            # 移至根目录
                 "AuditNotes": [{
                     "Id": str(uuid.uuid4()),
-                    "AuditorId": auditor_id,
-                    "ManufacturingProcess": "0",
-                    "OnSiteProcess": "1",
-                    "RemoteProcess": "0"
+                    "AuditorId": auditor_id
                 }]
             }
             for col in clause_cols:
@@ -325,8 +327,8 @@ def generate_json_logic(excel_file, base_data, user_data):
     return final_json
 
 # ================= 主界面 =================
-st.title("🛡️ 多模板审计转换引擎 (v38.0 靶向融合+产品留空版)")
-st.markdown("💡 **运行逻辑**：将以 `金磁.json` 作为全局底座，并将您上传的 JSON 模板中的 `Stage1...` 节点融合进去，最后注入 Excel 数据。")
+st.title("🛡️ 多模板审计转换引擎 (v39.0 结构纠正版)")
+st.markdown("💡 **修复内容**：1. AuditDate.Start/End 大小写与路径修正。2. Processes 根目录补齐 RepresentativeName 及业务标志位。")
 
 uploaded_files = st.file_uploader("📥 上传 Excel 数据表", type=["xlsx"], accept_multiple_files=True)
 
@@ -338,15 +340,21 @@ if uploaded_files:
             
             st.success(f"✅ {file.name} 转换成功")
             
+            # 增加过程信息的诊断抽样，让你一眼看清结构
+            sample_proc = res_json.get("Processes", [{}])[0] if res_json.get("Processes") else {}
+            
             with st.expander("👀 查看诊断面板", expanded=True):
                  st.code(f"""
-【模板融合确认】
-底层结构来源:           金磁.json
-Stage1Activities 来源:  {user_template_file.name if "Stage1Activities" in user_template_data else "未在上传模板中找到"}
+【AuditDate 校验】
+Start: {res_json.get('AuditData', {}).get('AuditDate', {}).get('Start', '缺失')}
+End:   {res_json.get('AuditData', {}).get('AuditDate', {}).get('End', '缺失')}
 
-【字段清空确认】
-AddressNative.Street1:  "{res_json['OrganizationInformation']['AddressNative'].get('Street1', '')}"
-Products:               "{res_json['OrganizationInformation'].get('LanguageByManufacturingPersonnel', {}).get('Products', '节点未找到')}"
+【过程清单抽样校验 (第一条)】
+ProcessName:          {sample_proc.get('ProcessName', '缺失')}
+RepresentativeName:   {sample_proc.get('RepresentativeName', '缺失')}
+ManufacturingProcess: {sample_proc.get('ManufacturingProcess', '缺失')}
+OnSiteProcess:        {sample_proc.get('OnSiteProcess', '缺失')}
+RemoteProcess:        {sample_proc.get('RemoteProcess', '缺失')}
                  """.strip(), language="yaml")
                  
             st.download_button(
@@ -357,6 +365,7 @@ Products:               "{res_json['OrganizationInformation'].get('LanguageByMan
             )
         except Exception as e:
             st.error(f"❌ {file.name} 处理失败: {str(e)}")
+
 
 
 
