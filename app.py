@@ -10,30 +10,43 @@ from datetime import datetime, timedelta
 
 # --- 页面配置 ---
 st.set_page_config(
-    page_title="IATF 审计转换工具 (v36.0 纯净提取版)",
+    page_title="IATF 审计转换工具 (v37.0)",
     page_icon="🛡️",
     layout="wide"
 )
 
-# --- 1. 侧边栏：强制要求用户导入模板 ---
+# --- 1. 侧边栏：模板加载与融合逻辑 ---
 with st.sidebar:
     st.header("⚙️ 模板配置")
-    st.warning("⚠️ 必须上传您的 JSON 模板。程序将仅提取指定的三个阶段数据。")
-    user_template = st.file_uploader("上传自定义 JSON 模板", type=["json"])
     
-    active_template = None
-    template_name = ""
-
-    if user_template:
+    # A. 强制读取本地的金磁.json作为标准底座
+    base_template = None
+    if os.path.exists('金磁.json'):
         try:
-            active_template = json.load(user_template)
-            template_name = user_template.name
-            st.success(f"✅ 成功加载模板: {template_name}")
+            with open('金磁.json', 'r', encoding='utf-8') as f:
+                base_template = json.load(f)
+            st.success("✅ 已加载标准底座: `金磁.json`")
         except Exception as e:
-            st.error(f"❌ 模板解析失败: {e}")
+            st.error(f"❌ 读取 `金磁.json` 失败: {e}")
             st.stop()
     else:
-        st.info("请先在左侧上传 JSON 模板文件。")
+        st.error("❌ 找不到标准底座 `金磁.json`！请确保它在项目根目录下。")
+        st.stop()
+
+    # B. 用户上传自己的模板用于提取 Stage1 节点
+    st.info("💡 请上传您的模板。程序将提取其中的 Stage1 节点来替换底座。")
+    user_template_file = st.file_uploader("上传自定义 JSON 模板", type=["json"])
+    
+    user_template_data = None
+    if user_template_file:
+        try:
+            user_template_data = json.load(user_template_file)
+            st.success(f"✅ 成功加载自定义模板: {user_template_file.name}")
+        except Exception as e:
+            st.error(f"❌ 自定义模板解析失败: {e}")
+            st.stop()
+    else:
+        st.warning("👈 请先在左侧上传 JSON 模板文件。")
         st.stop()
 
 # --- 辅助函数：安全寻址 ---
@@ -46,14 +59,15 @@ def ensure_path(d, path):
     return current
 
 # --- 核心转换逻辑 ---
-def generate_json_logic(excel_file, template_data):
-    # 💥 【核心修改】：不再全盘深拷贝，而是从零构建！
-    final_json = {}
+def generate_json_logic(excel_file, base_data, user_data):
+    # 💥 1. 模板靶向融合逻辑 💥
+    # 先完整拷贝金磁.json作为基础骨架
+    final_json = copy.deepcopy(base_data)
     
-    # 仅取用上传的 json 文件中指定的这三个特定节点
+    # 然后用用户上传的模板去“覆盖”那三个特定节点
     for key in ["Stage1Activities", "Stage1Part1", "Stage1Part2"]:
-        if key in template_data:
-            final_json[key] = copy.deepcopy(template_data[key])
+        if key in user_data:
+            final_json[key] = copy.deepcopy(user_data[key])
     
     try:
         xls = pd.ExcelFile(excel_file)
@@ -64,7 +78,6 @@ def generate_json_logic(excel_file, template_data):
     except Exception as e:
         raise ValueError(f"Excel 读取失败: {str(e)}")
 
-    # 智能游动扫描
     def find_val_by_key(df, keywords, col_offset=1):
         if df.empty: return ""
         for r in range(df.shape[0]):
@@ -76,14 +89,13 @@ def generate_json_logic(excel_file, template_data):
                             return str(df.iloc[r, c + col_offset]).strip()
         return ""
         
-    # 绝对坐标兜底 
     def get_db_val(r, c):
         try:
             val = db_df.iloc[r, c]
             return str(val).strip() if pd.notna(val) else ""
         except: return ""
 
-    # ================= 1. 数据提取 (双重保险) =================
+    # ================= 2. 数据提取 =================
     
     # [姓名]
     raw_name_full = find_val_by_key(db_df, ["姓名", "Auditor Name"]) or get_db_val(5, 1)
@@ -116,7 +128,7 @@ def generate_json_logic(excel_file, template_data):
                         if len(auditor_id) > 4: break
             if auditor_id and len(auditor_id) > 4: break
 
-    # [日期深度修复]
+    # [日期]
     start_date_raw = find_val_by_key(db_df, ["审核开始日期", "审核开始时间"]) or get_db_val(2, 1)
     end_date_raw = find_val_by_key(db_df, ["审核结束日期", "审核结束时间"]) or get_db_val(3, 1)
     
@@ -173,7 +185,7 @@ def generate_json_logic(excel_file, template_data):
         else:
             street = english_address
 
-    # ================= 2. 核心结构强制组装 =================
+    # ================= 3. 定点替换入 final_json =================
 
     final_json["uuid"] = str(uuid.uuid4())
     final_json["created"] = int(time.time() * 1000)
@@ -184,7 +196,6 @@ def generate_json_logic(excel_file, template_data):
     if end_iso: final_json["AuditData"]["AuditData"]["end"] = end_iso
     final_json["AuditData"]["CbIdentificationNo"] = find_val_by_key(db_df, ["认证机构标识号"]) or get_db_val(2, 4)
 
-    # 因为是空白重建，必须确保 AuditTeam 存在
     if "AuditTeam" not in final_json["AuditData"] or not final_json["AuditData"]["AuditTeam"]:
         final_json["AuditData"]["AuditTeam"] = [{}]
         
@@ -308,8 +319,8 @@ def generate_json_logic(excel_file, template_data):
     return final_json
 
 # ================= 主界面 =================
-st.title("🛡️ 多模板审计转换引擎 (v36.0 纯净提取版)")
-st.write(f"当前生效模板：**{template_name}**")
+st.title("🛡️ 多模板审计转换引擎 (v37.0 靶向融合版)")
+st.markdown("💡 **运行逻辑**：将以 `金磁.json` 作为全局底座，并将您上传的 JSON 模板中的 `Stage1...` 节点融合进去，最后注入 Excel 数据。")
 
 uploaded_files = st.file_uploader("📥 上传 Excel 数据表", type=["xlsx"], accept_multiple_files=True)
 
@@ -317,21 +328,20 @@ if uploaded_files:
     st.divider()
     for file in uploaded_files:
         try:
-            res_json = generate_json_logic(file, active_template)
-            
-            # 安全检查节点是否存在，避免网页预览报错
-            has_stage1 = "Stage1Activities" in res_json
+            # 传入 base_template (金磁.json) 和 user_template_data (用户上传的模板)
+            res_json = generate_json_logic(file, base_template, user_template_data)
             
             st.success(f"✅ {file.name} 转换成功")
             
             with st.expander("👀 查看诊断面板", expanded=True):
                  st.code(f"""
-【模板提取确认】
-成功从模板中剥离并嵌入 Stage1Activities: {has_stage1}
-成功从模板中剥离并嵌入 Stage1Part1:      {"Stage1Part1" in res_json}
-成功从模板中剥离并嵌入 Stage1Part2:      {"Stage1Part2" in res_json}
+【模板融合确认】
+底层结构来源:           金磁.json
+Stage1Activities 来源:  {user_template_file.name if "Stage1Activities" in user_template_data else "未在上传模板中找到"}
+Stage1Part1 来源:       {user_template_file.name if "Stage1Part1" in user_template_data else "未在上传模板中找到"}
+Stage1Part2 来源:       {user_template_file.name if "Stage1Part2" in user_template_data else "未在上传模板中找到"}
 
-【AddressNative 确认】
+【AddressNative 确认 (已强行留空)】
 Street1: "{res_json['OrganizationInformation']['AddressNative'].get('Street1', '')}"
                  """.strip(), language="yaml")
                  
@@ -343,6 +353,7 @@ Street1: "{res_json['OrganizationInformation']['AddressNative'].get('Street1', '
             )
         except Exception as e:
             st.error(f"❌ {file.name} 处理失败: {str(e)}")
+
 
 
 
