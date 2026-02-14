@@ -10,7 +10,7 @@ from datetime import datetime, timedelta
 
 # --- 页面配置 ---
 st.set_page_config(
-    page_title="IATF 审计转换工具 (v34.0 稳定版)",
+    page_title="IATF 审计转换工具 (v36.0 纯净提取版)",
     page_icon="🛡️",
     layout="wide"
 )
@@ -18,7 +18,7 @@ st.set_page_config(
 # --- 1. 侧边栏：强制要求用户导入模板 ---
 with st.sidebar:
     st.header("⚙️ 模板配置")
-    st.warning("⚠️ 必须上传您的 JSON 模板。程序不再提供默认模板。")
+    st.warning("⚠️ 必须上传您的 JSON 模板。程序将仅提取指定的三个阶段数据。")
     user_template = st.file_uploader("上传自定义 JSON 模板", type=["json"])
     
     active_template = None
@@ -47,7 +47,13 @@ def ensure_path(d, path):
 
 # --- 核心转换逻辑 ---
 def generate_json_logic(excel_file, template_data):
-    final_json = copy.deepcopy(template_data)
+    # 💥 【核心修改】：不再全盘深拷贝，而是从零构建！
+    final_json = {}
+    
+    # 仅取用上传的 json 文件中指定的这三个特定节点
+    for key in ["Stage1Activities", "Stage1Part1", "Stage1Part2"]:
+        if key in template_data:
+            final_json[key] = copy.deepcopy(template_data[key])
     
     try:
         xls = pd.ExcelFile(excel_file)
@@ -70,7 +76,7 @@ def generate_json_logic(excel_file, template_data):
                             return str(df.iloc[r, c + col_offset]).strip()
         return ""
         
-    # 绝对坐标兜底 (直接照搬 V8 稳定版的坐标)
+    # 绝对坐标兜底 
     def get_db_val(r, c):
         try:
             val = db_df.iloc[r, c]
@@ -110,7 +116,7 @@ def generate_json_logic(excel_file, template_data):
                         if len(auditor_id) > 4: break
             if auditor_id and len(auditor_id) > 4: break
 
-    # 💥 [日期深度修复：双重保险 + 强制格式化]
+    # [日期深度修复]
     start_date_raw = find_val_by_key(db_df, ["审核开始日期", "审核开始时间"]) or get_db_val(2, 1)
     end_date_raw = find_val_by_key(db_df, ["审核结束日期", "审核结束时间"]) or get_db_val(3, 1)
     
@@ -139,7 +145,6 @@ def generate_json_logic(excel_file, template_data):
     csr_date = fmt_iso(csr_date_raw)
 
     # [英文地址倒序切分]
-    native_street = ""
     english_address = ""
 
     if not info_df.empty:
@@ -152,9 +157,7 @@ def generate_json_logic(excel_file, template_data):
                         if rv and rv.lower() != 'nan':
                             lines = rv.replace('\r', '\n').split('\n')
                             en_lines = [l.strip() for l in lines if not re.search(r'[\u4e00-\u9fff]', l) and l.strip()]
-                            zh_lines = [l.strip() for l in lines if re.search(r'[\u4e00-\u9fff]', l) and l.strip()]
                             if en_lines: english_address = " ".join(en_lines)
-                            if zh_lines: native_street = " ".join(zh_lines)
                         break
             if english_address: break
 
@@ -170,7 +173,7 @@ def generate_json_logic(excel_file, template_data):
         else:
             street = english_address
 
-    # ================= 2. 定点替换 =================
+    # ================= 2. 核心结构强制组装 =================
 
     final_json["uuid"] = str(uuid.uuid4())
     final_json["created"] = int(time.time() * 1000)
@@ -181,15 +184,18 @@ def generate_json_logic(excel_file, template_data):
     if end_iso: final_json["AuditData"]["AuditData"]["end"] = end_iso
     final_json["AuditData"]["CbIdentificationNo"] = find_val_by_key(db_df, ["认证机构标识号"]) or get_db_val(2, 4)
 
-    if "AuditTeam" in final_json["AuditData"] and len(final_json["AuditData"]["AuditTeam"]) > 0:
-        team = final_json["AuditData"]["AuditTeam"][0]
-        team.update({
-            "Name": auditor_name,
-            "CaaNo": caa_no,
-            "AuditorId": auditor_id, 
-            "AuditDaysPerformed": 1.5,
-            "DatesOnSite": [{"Date": start_iso, "Day": 1}, {"Date": end_iso, "Day": 0.5}]
-        })
+    # 因为是空白重建，必须确保 AuditTeam 存在
+    if "AuditTeam" not in final_json["AuditData"] or not final_json["AuditData"]["AuditTeam"]:
+        final_json["AuditData"]["AuditTeam"] = [{}]
+        
+    team = final_json["AuditData"]["AuditTeam"][0]
+    team.update({
+        "Name": auditor_name,
+        "CaaNo": caa_no,
+        "AuditorId": auditor_id, 
+        "AuditDaysPerformed": 1.5,
+        "DatesOnSite": [{"Date": start_iso, "Day": 1}, {"Date": end_iso, "Day": 0.5}]
+    })
 
     # B. 组织与地址信息 
     ensure_path(final_json, ["OrganizationInformation", "AddressNative"])
@@ -207,8 +213,11 @@ def generate_json_logic(excel_file, template_data):
     extracted_email = find_val_by_key(db_df, ["电子邮箱", "邮箱", "Email", "E-mail"]) or get_db_val(16, 1)
     org["Email"] = "" if str(extracted_email).strip() == "0" else extracted_email
     
+    # AddressNative 留空
     org["AddressNative"].update({
-        "Street1": native_street,
+        "Street1": "",
+        "State": "",
+        "City": "",
         "Country": "中国",
         "PostalCode": find_val_by_key(db_df, ["邮政编码"]) or get_db_val(10, 4)
     })
@@ -221,22 +230,18 @@ def generate_json_logic(excel_file, template_data):
         "PostalCode": find_val_by_key(db_df, ["邮政编码"]) or get_db_val(10, 4)
     })
 
-    # C. 顾客与 CSR 定点替换
+    # C. 顾客与 CSR 
     ensure_path(final_json, ["CustomerInformation"])
-    if "Customers" not in final_json["CustomerInformation"] or not isinstance(final_json["CustomerInformation"]["Customers"], list):
+    if "Customers" not in final_json["CustomerInformation"] or not isinstance(final_json["CustomerInformation"]["Customers"], list) or not final_json["CustomerInformation"]["Customers"]:
         final_json["CustomerInformation"]["Customers"] = [{}]
-    elif len(final_json["CustomerInformation"]["Customers"]) == 0:
-        final_json["CustomerInformation"]["Customers"].append({})
         
     cust = final_json["CustomerInformation"]["Customers"][0]
     if "Id" not in cust: cust["Id"] = str(uuid.uuid4())
     if customer_name: cust["Name"] = customer_name
     if supplier_code: cust["SupplierCode"] = supplier_code
     
-    if "Csrs" not in cust or not isinstance(cust["Csrs"], list):
+    if "Csrs" not in cust or not isinstance(cust["Csrs"], list) or not cust["Csrs"]:
         cust["Csrs"] = [{}]
-    elif len(cust["Csrs"]) == 0:
-        cust["Csrs"].append({})
         
     csr = cust["Csrs"][0]
     if customer_name: csr["Name"] = customer_name
@@ -244,7 +249,33 @@ def generate_json_logic(excel_file, template_data):
     if csr_name: csr["NameCSRDocument"] = csr_name
     if csr_date: csr["DateCSRDocument"] = csr_date
 
-    # D. 过程清单重建
+    # D. 文件清单定点替换
+    docs_list = []
+    if not doc_list_df.empty:
+        for c in range(doc_list_df.shape[1]):
+            for r in range(doc_list_df.shape[0]):
+                cell_val = str(doc_list_df.iloc[r, c]).strip()
+                if "公司内对应的程序文件" in cell_val or "包含名称、编号、版本" in cell_val:
+                    for r2 in range(r + 1, doc_list_df.shape[0]):
+                        val = str(doc_list_df.iloc[r2, c]).strip()
+                        if val and val.lower() != 'nan':
+                            docs_list.append(val)
+                    break
+            if docs_list: break
+
+    if docs_list:
+        ensure_path(final_json, ["Stage1DocumentedRequirements"])
+        if "IatfClauseDocuments" not in final_json["Stage1DocumentedRequirements"] or not isinstance(final_json["Stage1DocumentedRequirements"]["IatfClauseDocuments"], list):
+            final_json["Stage1DocumentedRequirements"]["IatfClauseDocuments"] = []
+            
+        clause_docs = final_json["Stage1DocumentedRequirements"]["IatfClauseDocuments"]
+        for i, doc_name in enumerate(docs_list):
+            if i < len(clause_docs):
+                clause_docs[i]["DocumentName"] = doc_name
+            else:
+                clause_docs.append({"DocumentName": doc_name})
+
+    # E. 过程清单重建
     processes = []
     if not proc_df.empty:
         clause_cols = proc_df.columns[13:] if proc_df.shape[1] > 13 else []
@@ -267,7 +298,7 @@ def generate_json_logic(excel_file, template_data):
             processes.append(proc_obj)
     final_json["Processes"] = processes
 
-    # 💥 E. 结果日期：强制重新校验与写入
+    # F. 结果日期
     if "Results" not in final_json: final_json["Results"] = {}
     if "AuditReportFinal" not in final_json["Results"]: final_json["Results"]["AuditReportFinal"] = {}
     
@@ -277,7 +308,7 @@ def generate_json_logic(excel_file, template_data):
     return final_json
 
 # ================= 主界面 =================
-st.title("🛡️ 多模板审计转换引擎 (v34.0 绝不漏抓版)")
+st.title("🛡️ 多模板审计转换引擎 (v36.0 纯净提取版)")
 st.write(f"当前生效模板：**{template_name}**")
 
 uploaded_files = st.file_uploader("📥 上传 Excel 数据表", type=["xlsx"], accept_multiple_files=True)
@@ -288,19 +319,20 @@ if uploaded_files:
         try:
             res_json = generate_json_logic(file, active_template)
             
-            # 安全获取预览数据
-            res_dict = res_json.get("Results", {})
-            audit_report = res_dict.get("AuditReportFinal", {})
+            # 安全检查节点是否存在，避免网页预览报错
+            has_stage1 = "Stage1Activities" in res_json
             
             st.success(f"✅ {file.name} 转换成功")
             
-            with st.expander("👀 查看日期与核心字段诊断面板", expanded=True):
+            with st.expander("👀 查看诊断面板", expanded=True):
                  st.code(f"""
-【日期校验】
-AuditDate (Start): {res_json.get('AuditData', {}).get('AuditData', {}).get('start', '未提取到')}
-AuditDate (End):   {res_json.get('AuditData', {}).get('AuditData', {}).get('end', '未提取到')}
-AuditReportFinal:  {audit_report.get('Date', '未提取到')}
-NextScheduled:     {res_dict.get('DateNextScheduledAudit', '未提取到')}
+【模板提取确认】
+成功从模板中剥离并嵌入 Stage1Activities: {has_stage1}
+成功从模板中剥离并嵌入 Stage1Part1:      {"Stage1Part1" in res_json}
+成功从模板中剥离并嵌入 Stage1Part2:      {"Stage1Part2" in res_json}
+
+【AddressNative 确认】
+Street1: "{res_json['OrganizationInformation']['AddressNative'].get('Street1', '')}"
                  """.strip(), language="yaml")
                  
             st.download_button(
@@ -311,6 +343,7 @@ NextScheduled:     {res_dict.get('DateNextScheduledAudit', '未提取到')}
             )
         except Exception as e:
             st.error(f"❌ {file.name} 处理失败: {str(e)}")
+
 
 
 
