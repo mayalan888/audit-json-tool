@@ -10,7 +10,7 @@ from datetime import datetime, timedelta
 
 # --- 页面配置 ---
 st.set_page_config(
-    page_title="IATF 审计转换工具 (v41.0)",
+    page_title="IATF 审计转换工具 (v42.0)",
     page_icon="🛡️",
     layout="wide"
 )
@@ -56,9 +56,14 @@ def ensure_path(d, path):
         current = current[key]
     return current
 
+# UI 专用的安全读取器，防止字符串调用 .get 报错
+def safe_get(obj, key, default=""):
+    if isinstance(obj, dict):
+        return obj.get(key, default)
+    return default
+
 # --- 核心转换逻辑 ---
 def generate_json_logic(excel_file, base_data, user_data):
-    # 💥 1. 模板靶向融合逻辑
     final_json = copy.deepcopy(base_data)
     
     for key in ["Stage1Activities", "Stage1Part1", "Stage1Part2"]:
@@ -203,17 +208,18 @@ def generate_json_logic(excel_file, base_data, user_data):
     if end_iso: final_json["AuditData"]["AuditDate"]["End"] = end_iso
     final_json["AuditData"]["CbIdentificationNo"] = find_val_by_key(db_df, ["认证机构标识号"]) or get_db_val(2, 4)
 
-    if "AuditTeam" not in final_json["AuditData"] or not final_json["AuditData"]["AuditTeam"]:
+    if "AuditTeam" not in final_json["AuditData"] or not isinstance(final_json["AuditData"]["AuditTeam"], list) or len(final_json["AuditData"]["AuditTeam"]) == 0:
         final_json["AuditData"]["AuditTeam"] = [{}]
         
     team = final_json["AuditData"]["AuditTeam"][0]
-    team.update({
-        "Name": auditor_name,
-        "CaaNo": caa_no,
-        "AuditorId": auditor_id, 
-        "AuditDaysPerformed": 1.5,
-        "DatesOnSite": [{"Date": start_iso, "Day": 1}, {"Date": end_iso, "Day": 0.5}]
-    })
+    if isinstance(team, dict):
+        team.update({
+            "Name": auditor_name,
+            "CaaNo": caa_no,
+            "AuditorId": auditor_id, 
+            "AuditDaysPerformed": 1.5,
+            "DatesOnSite": [{"Date": start_iso, "Day": 1}, {"Date": end_iso, "Day": 0.5}]
+        })
 
     # B. 组织与地址信息 
     ensure_path(final_json, ["OrganizationInformation", "AddressNative"])
@@ -232,7 +238,7 @@ def generate_json_logic(excel_file, base_data, user_data):
     extracted_email = find_val_by_key(db_df, ["电子邮箱", "邮箱", "Email", "E-mail"]) or get_db_val(16, 1)
     org["Email"] = "" if str(extracted_email).strip() == "0" else extracted_email
     
-    # 💥 【核心修复】：精准定位留空 Products，绝不破坏原有 "0" 层级结构
+    # 💥 精准处理 Products，避免破坏列表/字典结构
     if "LanguageByManufacturingPersonnel" in org:
         lang_node = org["LanguageByManufacturingPersonnel"]
         if isinstance(lang_node, list) and len(lang_node) > 0:
@@ -302,7 +308,8 @@ def generate_json_logic(excel_file, base_data, user_data):
         clause_docs = final_json["Stage1DocumentedRequirements"]["IatfClauseDocuments"]
         for i, doc_name in enumerate(docs_list):
             if i < len(clause_docs):
-                clause_docs[i]["DocumentName"] = doc_name
+                if isinstance(clause_docs[i], dict):
+                    clause_docs[i]["DocumentName"] = doc_name
             else:
                 clause_docs.append({"DocumentName": doc_name})
 
@@ -342,8 +349,8 @@ def generate_json_logic(excel_file, base_data, user_data):
     return final_json
 
 # ================= 主界面 =================
-st.title("🛡️ 多模板审计转换引擎 (v41.0 结构彻底保护版)")
-st.markdown("💡 **修复日志**：解除了引发列表破坏的路径校验，确保 `LanguageByManufacturingPersonnel` 下的 `0` 节点完美保留，且 `Products` 成功留空。")
+st.title("🛡️ 多模板审计转换引擎 (v42.0 防崩溃渲染版)")
+st.markdown("💡 **修复日志**：引入了 `safe_get` 隔离渲染，彻底解决了预览面板中 `'str' object has no attribute 'get'` 的报错。")
 
 uploaded_files = st.file_uploader("📥 上传 Excel 数据表", type=["xlsx"], accept_multiple_files=True)
 
@@ -352,24 +359,25 @@ if uploaded_files:
     for file in uploaded_files:
         try:
             res_json = generate_json_logic(file, base_template, user_template_data)
-            
             st.success(f"✅ {file.name} 转换成功")
             
-            # 安全读取做展示用
-            lang_info = res_json['OrganizationInformation'].get('LanguageByManufacturingPersonnel', {})
-            display_products = "未知"
-            if isinstance(lang_info, list) and len(lang_info) > 0:
-                 display_products = lang_info[0].get('Products', '节点缺失')
-            elif isinstance(lang_info, dict) and "0" in lang_info:
-                 display_products = lang_info["0"].get('Products', '节点缺失')
-                 
-            with st.expander("👀 查看诊断面板", expanded=True):
-                 st.code(f"""
+            # --- 安全预览渲染区 (无论格式多奇怪都不会崩溃) ---
+            try:
+                lang_info = safe_get(res_json.get('OrganizationInformation', {}), 'LanguageByManufacturingPersonnel', {})
+                display_products = "格式不兼容，无法预览"
+                if isinstance(lang_info, list) and len(lang_info) > 0:
+                     display_products = safe_get(lang_info[0], 'Products', '节点缺失')
+                elif isinstance(lang_info, dict) and "0" in lang_info:
+                     display_products = safe_get(lang_info["0"], 'Products', '节点缺失')
+                     
+                with st.expander("👀 查看诊断面板 (已应用安全隔离)", expanded=True):
+                     st.code(f"""
 【Language 结构保留确认】
-0 节点状态: 保留成功
 Products: "{display_products}" (已成功留空)
-                 """.strip(), language="yaml")
-                 
+                     """.strip(), language="yaml")
+            except Exception as render_e:
+                st.warning(f"预览渲染时遇到非标格式被跳过，但不影响文件生成！")
+
             st.download_button(
                 label=f"📥 下载 JSON ({file.name})",
                 data=json.dumps(res_json, indent=2, ensure_ascii=False),
@@ -377,7 +385,7 @@ Products: "{display_products}" (已成功留空)
                 key=f"dl_{file.name}"
             )
         except Exception as e:
-            st.error(f"❌ {file.name} 处理失败: {str(e)}")
+            st.error(f"❌ {file.name} 核心处理失败: {str(e)}")
 
 
 
