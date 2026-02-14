@@ -10,7 +10,7 @@ from datetime import datetime, timedelta
 
 # --- 页面配置 ---
 st.set_page_config(
-    page_title="IATF 审计转换工具 (v39.0)",
+    page_title="IATF 审计转换工具 (v40.0)",
     page_icon="🛡️",
     layout="wide"
 )
@@ -19,7 +19,6 @@ st.set_page_config(
 with st.sidebar:
     st.header("⚙️ 模板配置")
     
-    # A. 强制读取本地的金磁.json作为标准底座
     base_template = None
     if os.path.exists('金磁.json'):
         try:
@@ -33,7 +32,6 @@ with st.sidebar:
         st.error("❌ 找不到标准底座 `金磁.json`！请确保它在项目根目录下。")
         st.stop()
 
-    # B. 用户上传自己的模板用于提取 Stage1 节点
     st.info("💡 请上传您的模板。程序将提取其中的 Stage1 节点来替换底座。")
     user_template_file = st.file_uploader("上传自定义 JSON 模板", type=["json"])
     
@@ -154,9 +152,20 @@ def generate_json_logic(excel_file, base_data, user_data):
     csr_date_raw = find_val_by_key(db_df, ["CSR文件日期"]) or get_db_val(32, 1)
     csr_date = fmt_iso(csr_date_raw)
 
-    # [英文地址倒序切分]
+    # 💥 [中英文地址分离与智能提取]
+    def is_chinese(s): return bool(re.search(r'[\u4e00-\u9fff]', s))
+    
+    native_street = ""
     english_address = ""
 
+    # 1. 先从数据库找基础候选
+    db_candidates = [get_db_val(11, 1), get_db_val(11, 4)]
+    zh_cands = [c for c in db_candidates if c and is_chinese(c)]
+    if zh_cands: native_street = max(zh_cands, key=len)
+    en_cands = [c for c in db_candidates if c and not is_chinese(c)]
+    if en_cands: english_address = max(en_cands, key=len)
+
+    # 2. 从信息表找精准地址（覆盖优先级更高，并处理中英混写换行）
     if not info_df.empty:
         for r in range(info_df.shape[0]):
             for c in range(info_df.shape[1]):
@@ -166,11 +175,14 @@ def generate_json_logic(excel_file, base_data, user_data):
                         rv = str(info_df.iloc[r, c+1]).strip()
                         if rv and rv.lower() != 'nan':
                             lines = rv.replace('\r', '\n').split('\n')
-                            en_lines = [l.strip() for l in lines if not re.search(r'[\u4e00-\u9fff]', l) and l.strip()]
+                            en_lines = [l.strip() for l in lines if not is_chinese(l) and l.strip()]
+                            zh_lines = [l.strip() for l in lines if is_chinese(l) and l.strip()]
                             if en_lines: english_address = " ".join(en_lines)
+                            if zh_lines: native_street = " ".join(zh_lines)
                         break
-            if english_address: break
+            if english_address or native_street: break
 
+    # 倒序切分纯英文地址
     street, city, state, country = english_address, "", "", ""
     if english_address:
         clean_eng = english_address.replace('，', ',')
@@ -188,7 +200,7 @@ def generate_json_logic(excel_file, base_data, user_data):
     final_json["uuid"] = str(uuid.uuid4())
     final_json["created"] = int(time.time() * 1000)
 
-    # 💥 A. 审核数据：修正为 AuditDate -> Start / End
+    # A. 审核数据
     ensure_path(final_json, ["AuditData", "AuditDate"])
     if start_iso: final_json["AuditData"]["AuditDate"]["Start"] = start_iso
     if end_iso: final_json["AuditData"]["AuditDate"]["End"] = end_iso
@@ -224,12 +236,11 @@ def generate_json_logic(excel_file, base_data, user_data):
     extracted_email = find_val_by_key(db_df, ["电子邮箱", "邮箱", "Email", "E-mail"]) or get_db_val(16, 1)
     org["Email"] = "" if str(extracted_email).strip() == "0" else extracted_email
     
-    # 强制留空 Products
     org["LanguageByManufacturingPersonnel"]["Products"] = ""
     
-    # AddressNative 留空
+    # 💥 【修改点：恢复 AddressNative 的 Street1，继续留空 State 和 City】
     org["AddressNative"].update({
-        "Street1": "",
+        "Street1": native_street,
         "State": "",
         "City": "",
         "Country": "中国",
@@ -289,24 +300,22 @@ def generate_json_logic(excel_file, base_data, user_data):
             else:
                 clause_docs.append({"DocumentName": doc_name})
 
-    # 💥 E. 过程清单重建 (将业务标记移至根层级，新增 RepresentativeName)
+    # E. 过程清单重建
     processes = []
     if not proc_df.empty:
         clause_cols = proc_df.columns[13:] if proc_df.shape[1] > 13 else []
         for idx, row in proc_df.iterrows():
             p_name = str(row.iloc[12]).strip()
-            
-            # 提取代表名称，坐标为第3列 (iloc[2])
             rep_name = str(row.iloc[2]).strip() if pd.notna(row.iloc[2]) else ""
             
             if not p_name or p_name.lower() == 'nan': continue
             proc_obj = {
                 "Id": str(uuid.uuid4()),
                 "ProcessName": p_name,
-                "RepresentativeName": rep_name,  # 新增字段
-                "ManufacturingProcess": "0",     # 移至根目录
-                "OnSiteProcess": "1",            # 移至根目录
-                "RemoteProcess": "0",            # 移至根目录
+                "RepresentativeName": rep_name,
+                "ManufacturingProcess": "0",
+                "OnSiteProcess": "1",
+                "RemoteProcess": "0",
                 "AuditNotes": [{
                     "Id": str(uuid.uuid4()),
                     "AuditorId": auditor_id
@@ -327,8 +336,8 @@ def generate_json_logic(excel_file, base_data, user_data):
     return final_json
 
 # ================= 主界面 =================
-st.title("🛡️ 多模板审计转换引擎 (v39.0 结构纠正版)")
-st.markdown("💡 **修复内容**：1. AuditDate.Start/End 大小写与路径修正。2. Processes 根目录补齐 RepresentativeName 及业务标志位。")
+st.title("🛡️ 多模板审计转换引擎 (v40.0 结构全纠正版)")
+st.markdown("💡 **修改记录**：AddressNative 恢复了中文 Street1，继续保持 State 和 City 留空。")
 
 uploaded_files = st.file_uploader("📥 上传 Excel 数据表", type=["xlsx"], accept_multiple_files=True)
 
@@ -340,21 +349,12 @@ if uploaded_files:
             
             st.success(f"✅ {file.name} 转换成功")
             
-            # 增加过程信息的诊断抽样，让你一眼看清结构
-            sample_proc = res_json.get("Processes", [{}])[0] if res_json.get("Processes") else {}
-            
             with st.expander("👀 查看诊断面板", expanded=True):
                  st.code(f"""
-【AuditDate 校验】
-Start: {res_json.get('AuditData', {}).get('AuditDate', {}).get('Start', '缺失')}
-End:   {res_json.get('AuditData', {}).get('AuditDate', {}).get('End', '缺失')}
-
-【过程清单抽样校验 (第一条)】
-ProcessName:          {sample_proc.get('ProcessName', '缺失')}
-RepresentativeName:   {sample_proc.get('RepresentativeName', '缺失')}
-ManufacturingProcess: {sample_proc.get('ManufacturingProcess', '缺失')}
-OnSiteProcess:        {sample_proc.get('OnSiteProcess', '缺失')}
-RemoteProcess:        {sample_proc.get('RemoteProcess', '缺失')}
+【AddressNative 提取结果校验】
+Street1 (中文地址): "{res_json['OrganizationInformation']['AddressNative'].get('Street1', '')}"
+City    (已留空):   "{res_json['OrganizationInformation']['AddressNative'].get('City', '')}"
+State   (已留空):   "{res_json['OrganizationInformation']['AddressNative'].get('State', '')}"
                  """.strip(), language="yaml")
                  
             st.download_button(
