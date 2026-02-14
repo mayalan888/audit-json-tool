@@ -10,7 +10,7 @@ from datetime import datetime, timedelta
 
 # --- 页面配置 ---
 st.set_page_config(
-    page_title="IATF 审计转换工具 (v37.0)",
+    page_title="IATF 审计转换工具 (v38.0)",
     page_icon="🛡️",
     layout="wide"
 )
@@ -60,7 +60,7 @@ def ensure_path(d, path):
 
 # --- 核心转换逻辑 ---
 def generate_json_logic(excel_file, base_data, user_data):
-    # 💥 1. 模板靶向融合逻辑 💥
+    # 💥 1. 模板靶向融合逻辑
     # 先完整拷贝金磁.json作为基础骨架
     final_json = copy.deepcopy(base_data)
     
@@ -211,6 +211,9 @@ def generate_json_logic(excel_file, base_data, user_data):
     # B. 组织与地址信息 
     ensure_path(final_json, ["OrganizationInformation", "AddressNative"])
     ensure_path(final_json, ["OrganizationInformation", "Address"])
+    # 💥 新增安全路径，确保 LanguageByManufacturingPersonnel 存在
+    ensure_path(final_json, ["OrganizationInformation", "LanguageByManufacturingPersonnel"])
+    
     org = final_json["OrganizationInformation"]
     
     org["OrganizationName"] = find_val_by_key(db_df, ["组织名称"]) or get_db_val(1, 4)
@@ -223,6 +226,9 @@ def generate_json_logic(excel_file, base_data, user_data):
     org["Telephone"] = find_val_by_key(db_df, ["联系电话", "电话", "Telephone"]) or get_db_val(15, 4)
     extracted_email = find_val_by_key(db_df, ["电子邮箱", "邮箱", "Email", "E-mail"]) or get_db_val(16, 1)
     org["Email"] = "" if str(extracted_email).strip() == "0" else extracted_email
+    
+    # 💥 【修改点】：强制留空 Products
+    org["LanguageByManufacturingPersonnel"]["Products"] = ""
     
     # AddressNative 留空
     org["AddressNative"].update({
@@ -319,7 +325,7 @@ def generate_json_logic(excel_file, base_data, user_data):
     return final_json
 
 # ================= 主界面 =================
-st.title("🛡️ 多模板审计转换引擎 (v37.0 靶向融合版)")
+st.title("🛡️ 多模板审计转换引擎 (v38.0 靶向融合+产品留空版)")
 st.markdown("💡 **运行逻辑**：将以 `金磁.json` 作为全局底座，并将您上传的 JSON 模板中的 `Stage1...` 节点融合进去，最后注入 Excel 数据。")
 
 uploaded_files = st.file_uploader("📥 上传 Excel 数据表", type=["xlsx"], accept_multiple_files=True)
@@ -328,7 +334,6 @@ if uploaded_files:
     st.divider()
     for file in uploaded_files:
         try:
-            # 传入 base_template (金磁.json) 和 user_template_data (用户上传的模板)
             res_json = generate_json_logic(file, base_template, user_template_data)
             
             st.success(f"✅ {file.name} 转换成功")
@@ -338,11 +343,10 @@ if uploaded_files:
 【模板融合确认】
 底层结构来源:           金磁.json
 Stage1Activities 来源:  {user_template_file.name if "Stage1Activities" in user_template_data else "未在上传模板中找到"}
-Stage1Part1 来源:       {user_template_file.name if "Stage1Part1" in user_template_data else "未在上传模板中找到"}
-Stage1Part2 来源:       {user_template_file.name if "Stage1Part2" in user_template_data else "未在上传模板中找到"}
 
-【AddressNative 确认 (已强行留空)】
-Street1: "{res_json['OrganizationInformation']['AddressNative'].get('Street1', '')}"
+【字段清空确认】
+AddressNative.Street1:  "{res_json['OrganizationInformation']['AddressNative'].get('Street1', '')}"
+Products:               "{res_json['OrganizationInformation'].get('LanguageByManufacturingPersonnel', {}).get('Products', '节点未找到')}"
                  """.strip(), language="yaml")
                  
             st.download_button(
