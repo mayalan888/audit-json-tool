@@ -10,7 +10,7 @@ from datetime import datetime, timedelta
 
 # --- 页面配置 ---
 st.set_page_config(
-    page_title="IATF 审计转换工具 (v42.0)",
+    page_title="IATF 审计转换工具 (v43.0)",
     page_icon="🛡️",
     layout="wide"
 )
@@ -238,7 +238,6 @@ def generate_json_logic(excel_file, base_data, user_data):
     extracted_email = find_val_by_key(db_df, ["电子邮箱", "邮箱", "Email", "E-mail"]) or get_db_val(16, 1)
     org["Email"] = "" if str(extracted_email).strip() == "0" else extracted_email
     
-    # 💥 精准处理 Products，避免破坏列表/字典结构
     if "LanguageByManufacturingPersonnel" in org:
         lang_node = org["LanguageByManufacturingPersonnel"]
         if isinstance(lang_node, list) and len(lang_node) > 0:
@@ -250,7 +249,6 @@ def generate_json_logic(excel_file, base_data, user_data):
             else:
                 lang_node["Products"] = ""
     
-    # AddressNative 处理
     org["AddressNative"].update({
         "Street1": native_street,
         "State": "",
@@ -318,7 +316,9 @@ def generate_json_logic(excel_file, base_data, user_data):
     if not proc_df.empty:
         clause_cols = proc_df.columns[13:] if proc_df.shape[1] > 13 else []
         for idx, row in proc_df.iterrows():
-            p_name = str(row.iloc[12]).strip()
+            # 💥 【修改点】：ProcessName 改为从 A 列 (索引 0) 提取
+            p_name = str(row.iloc[0]).strip()
+            
             rep_name = str(row.iloc[2]).strip() if pd.notna(row.iloc[2]) else ""
             
             if not p_name or p_name.lower() == 'nan': continue
@@ -349,8 +349,8 @@ def generate_json_logic(excel_file, base_data, user_data):
     return final_json
 
 # ================= 主界面 =================
-st.title("🛡️ 多模板审计转换引擎 (v42.0 防崩溃渲染版)")
-st.markdown("💡 **修复日志**：引入了 `safe_get` 隔离渲染，彻底解决了预览面板中 `'str' object has no attribute 'get'` 的报错。")
+st.title("🛡️ 多模板审计转换引擎 (v43.0 A列提取版)")
+st.markdown("💡 **修改日志**：`ProcessName` 已更新为从【过程清单】的 **A列 (第一列)** 提取。")
 
 uploaded_files = st.file_uploader("📥 上传 Excel 数据表", type=["xlsx"], accept_multiple_files=True)
 
@@ -361,22 +361,19 @@ if uploaded_files:
             res_json = generate_json_logic(file, base_template, user_template_data)
             st.success(f"✅ {file.name} 转换成功")
             
-            # --- 安全预览渲染区 (无论格式多奇怪都不会崩溃) ---
             try:
-                lang_info = safe_get(res_json.get('OrganizationInformation', {}), 'LanguageByManufacturingPersonnel', {})
-                display_products = "格式不兼容，无法预览"
-                if isinstance(lang_info, list) and len(lang_info) > 0:
-                     display_products = safe_get(lang_info[0], 'Products', '节点缺失')
-                elif isinstance(lang_info, dict) and "0" in lang_info:
-                     display_products = safe_get(lang_info["0"], 'Products', '节点缺失')
+                # 安全抽取用于展示的第一条过程记录
+                sample_proc = {}
+                if "Processes" in res_json and len(res_json["Processes"]) > 0:
+                    sample_proc = res_json["Processes"][0]
                      
-                with st.expander("👀 查看诊断面板 (已应用安全隔离)", expanded=True):
+                with st.expander("👀 查看过程清单诊断面板", expanded=True):
                      st.code(f"""
-【Language 结构保留确认】
-Products: "{display_products}" (已成功留空)
+【过程清单第一条提取预览 (来自 A 列)】
+ProcessName: "{safe_get(sample_proc, 'ProcessName', '缺失')}"
                      """.strip(), language="yaml")
-            except Exception as render_e:
-                st.warning(f"预览渲染时遇到非标格式被跳过，但不影响文件生成！")
+            except Exception:
+                pass
 
             st.download_button(
                 label=f"📥 下载 JSON ({file.name})",
