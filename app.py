@@ -10,7 +10,7 @@ from datetime import datetime, timedelta
 
 # --- 页面配置 ---
 st.set_page_config(
-    page_title="IATF 审计转换工具 (v50.0)",
+    page_title="IATF 审计转换工具 (v51.0)",
     page_icon="🛡️",
     layout="wide"
 )
@@ -97,12 +97,10 @@ def generate_json_logic(excel_file, base_data, user_data):
 
     # ================= 2. 数据提取 =================
     
-    # 💥 [姓名提取与处理逻辑]
+    # [姓名提取与处理逻辑]
     raw_name_full = find_val_by_key(db_df, ["姓名", "Auditor Name"]) or get_db_val(5, 1)
-    # raw_name 就是原汁原味的、剔除了“姓名:”前缀后的原始内容
     raw_name = raw_name_full.replace("姓名:", "").replace("Name:", "").strip() if raw_name_full else ""
     
-    # 依然保留英文名字的生成逻辑在内存中（备用）
     auditor_name = raw_name
     english_part = re.sub(r'[\u4e00-\u9fff]', '', raw_name).strip()
     if english_part:
@@ -179,10 +177,6 @@ def generate_json_logic(excel_file, base_data, user_data):
                 date_val = str(info_df.iloc[r, col_map['date']]).strip() if col_map['date'] != -1 else ""
                 code_val = str(info_df.iloc[r, col_map['code']]).strip() if col_map['code'] != -1 else ""
                 
-                if name_val.lower() == 'nan': name_val = ""
-                if date_val.lower() == 'nan': date_val = ""
-                if code_val.lower() == 'nan': code_val = ""
-
                 final_date = date_val.replace(" 00:00:00", "").strip()
 
                 customers_list.append({
@@ -260,9 +254,9 @@ def generate_json_logic(excel_file, base_data, user_data):
     if end_iso: final_json["AuditData"]["AuditDate"]["End"] = end_iso
     final_json["AuditData"]["CbIdentificationNo"] = find_val_by_key(db_df, ["认证机构标识号"]) or get_db_val(2, 4)
     
-    # 💥 【关键修复】：强制将原始名字 raw_name 赋予 AuditorName 和 auditname（双轨并存防漏）
+    # 💥 【关键更正】：将键名精确更正为小写 auditorname
     final_json["AuditData"]["AuditorName"] = raw_name
-    final_json["AuditData"]["auditname"] = raw_name
+    final_json["AuditData"]["auditorname"] = raw_name
 
     if "AuditTeam" not in final_json["AuditData"] or not isinstance(final_json["AuditData"]["AuditTeam"], list) or len(final_json["AuditData"]["AuditTeam"]) == 0:
         final_json["AuditData"]["AuditTeam"] = [{}]
@@ -270,7 +264,7 @@ def generate_json_logic(excel_file, base_data, user_data):
     team = final_json["AuditData"]["AuditTeam"][0]
     if isinstance(team, dict):
         team.update({
-            "Name": raw_name, # 💥 同样赋给这里的 Name
+            "Name": raw_name, 
             "CaaNo": caa_no,
             "AuditorId": auditor_id, 
             "AuditDaysPerformed": 1.5,
@@ -395,8 +389,8 @@ def generate_json_logic(excel_file, base_data, user_data):
     return final_json
 
 # ================= 主界面 =================
-st.title("🛡️ 多模板审计转换引擎 (v50.0 姓名原样直出版)")
-st.markdown("💡 **修改日志**：已将 `auditname` (含 `AuditorName`) 以及 `AuditTeam` 下的 `Name` 强制设定为 Excel 中直接提取出的原始姓名。")
+st.title("🛡️ 多模板审计转换引擎 (v51.0 键名精准更正版)")
+st.markdown("💡 **修改日志**：已将 `AuditData` 下的专属姓名键严格更正为全小写的 `auditorname`。")
 
 uploaded_files = st.file_uploader("📥 上传 Excel 数据表", type=["xlsx"], accept_multiple_files=True)
 
@@ -411,7 +405,7 @@ if uploaded_files:
                  st.code(f"""
 【原始姓名生成确认】
 AuditorName (AuditData级): "{res_json.get('AuditData', {}).get('AuditorName', '缺失')}"
-auditname   (AuditData级): "{res_json.get('AuditData', {}).get('auditname', '缺失')}"
+auditorname (AuditData级): "{res_json.get('AuditData', {}).get('auditorname', '缺失')}"
 Name (AuditTeam级):        "{safe_get(res_json.get('AuditData', {}).get('AuditTeam', [{}])[0], 'Name', '缺失')}"
                  """.strip(), language="yaml")
 
@@ -423,6 +417,7 @@ Name (AuditTeam级):        "{safe_get(res_json.get('AuditData', {}).get('AuditT
             )
         except Exception as e:
             st.error(f"❌ {file.name} 核心处理失败: {str(e)}")
+
 
 
 
