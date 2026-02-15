@@ -10,7 +10,7 @@ from datetime import datetime, timedelta
 
 # --- 页面配置 ---
 st.set_page_config(
-    page_title="IATF 审计转换工具 (v46.0)",
+    page_title="IATF 审计转换工具 (v48.0)",
     page_icon="🛡️",
     layout="wide"
 )
@@ -97,7 +97,7 @@ def generate_json_logic(excel_file, base_data, user_data):
 
     # ================= 2. 数据提取 =================
     
-    # [姓名]
+    # 💥 [姓名提取与处理逻辑 (完美保留)]
     raw_name_full = find_val_by_key(db_df, ["姓名", "Auditor Name"]) or get_db_val(5, 1)
     raw_name = raw_name_full.replace("姓名:", "").replace("Name:", "").strip() if raw_name_full else ""
     auditor_name = raw_name
@@ -204,36 +204,62 @@ def generate_json_logic(excel_file, base_data, user_data):
                 "DateCSRDocument": csr_date if csr_date else csr_date_raw
             })
 
-    # 💥 [中英文地址分离 - 已修复短路 Bug]
-    def is_chinese(s): return bool(re.search(r'[\u4e00-\u9fff]', s))
-    native_street, english_address = "", ""
+    # [终极全方位雷达提取地址]
+    english_address = ""
+    native_street = ""
+    
+    def get_adjacent_cells(df, keywords):
+        cands = []
+        if df.empty: return cands
+        for r in range(df.shape[0]):
+            for c in range(df.shape[1]):
+                val = str(df.iloc[r, c]).strip().upper()
+                for k in keywords:
+                    if k.upper() in val:
+                        if c + 1 < df.shape[1]: cands.append(str(df.iloc[r, c+1]))
+                        if c + 2 < df.shape[1]: cands.append(str(df.iloc[r, c+2]))
+                        if c + 3 < df.shape[1]: cands.append(str(df.iloc[r, c+3]))
+                        if c + 4 < df.shape[1]: cands.append(str(df.iloc[r, c+4]))
+        return [str(x).strip() for x in cands if str(x).strip() and str(x).lower() != 'nan']
 
-    # 1. 数据库基础兜底
-    db_candidates = [get_db_val(11, 1), get_db_val(11, 4)]
-    zh_cands = [c for c in db_candidates if c and is_chinese(c)]
-    en_cands = [c for c in db_candidates if c and not is_chinese(c)]
-    if zh_cands: native_street = max(zh_cands, key=len)
-    if en_cands: english_address = max(en_cands, key=len)
+    raw_cands = get_adjacent_cells(info_df, ["审核地址", "AUDIT ADDRESS", "ADDRESS"]) + \
+                get_adjacent_cells(db_df, ["地址", "ADDRESS"])
+                
+    en_candidates = []
+    zh_candidates = []
 
-    # 2. 信息表高优覆盖 (使用 found_in_info 标志位，防止被 native_street 误导短路)
-    found_in_info = False
-    if not info_df.empty:
-        for r in range(info_df.shape[0]):
-            for c in range(info_df.shape[1]):
-                val = str(info_df.iloc[r, c]).strip()
-                if "审核地址" in val or "Audit Address" in val:
-                    if c + 1 < info_df.shape[1]:
-                        rv = str(info_df.iloc[r, c+1]).strip()
-                        if rv and rv.lower() != 'nan':
-                            lines = rv.replace('\r', '\n').split('\n')
-                            en_lines = [l.strip() for l in lines if not is_chinese(l) and l.strip()]
-                            zh_lines = [l.strip() for l in lines if is_chinese(l) and l.strip()]
-                            # 覆盖数据库提取的内容
-                            if en_lines: english_address = " ".join(en_lines)
-                            if zh_lines: native_street = " ".join(zh_lines)
-                            found_in_info = True
-                        break
-            if found_in_info: break
+    for cand in raw_cands:
+        lines = cand.replace('\r', '\n').split('\n')
+        en_parts = []
+        zh_parts = []
+        for line in lines:
+            line = line.strip()
+            if not line: continue
+            if re.search(r'[\u4e00-\u9fff]', line):
+                zh_parts.append(line)
+            elif re.search(r'[a-zA-Z]', line):
+                en_parts.append(line)
+        
+        if en_parts: en_candidates.append(" ".join(en_parts))
+        if zh_parts: zh_candidates.append(" ".join(zh_parts))
+
+    english_address = max(en_candidates, key=len) if en_candidates else ""
+    native_street = max(zh_candidates, key=len) if zh_candidates else ""
+
+    if not english_address:
+        for df in [info_df, db_df]:
+            if df.empty: continue
+            for r in range(df.shape[0]):
+                for c in range(df.shape[1]):
+                    val = str(df.iloc[r, c]).strip()
+                    val_upper = val.upper()
+                    if ("PROVINCE" in val_upper or "CITY" in val_upper) and re.search(r'[a-zA-Z]', val):
+                        lines = val.replace('\r', '\n').split('\n')
+                        en_parts = [l.strip() for l in lines if not re.search(r'[\u4e00-\u9fff]', l) and re.search(r'[a-zA-Z]', l)]
+                        if en_parts:
+                            cand = " ".join(en_parts)
+                            if len(cand) > len(english_address):
+                                english_address = cand
 
     street, city, state, country = english_address, "", "", ""
     if english_address:
@@ -258,7 +284,7 @@ def generate_json_logic(excel_file, base_data, user_data):
     if end_iso: final_json["AuditData"]["AuditDate"]["End"] = end_iso
     final_json["AuditData"]["CbIdentificationNo"] = find_val_by_key(db_df, ["认证机构标识号"]) or get_db_val(2, 4)
     
-    # 💥 [赋值 AuditorName]
+    # 💥 精准赋给 AuditData 下的 AuditorName
     final_json["AuditData"]["AuditorName"] = auditor_name
 
     if "AuditTeam" not in final_json["AuditData"] or not isinstance(final_json["AuditData"]["AuditTeam"], list) or len(final_json["AuditData"]["AuditTeam"]) == 0:
@@ -267,7 +293,7 @@ def generate_json_logic(excel_file, base_data, user_data):
     team = final_json["AuditData"]["AuditTeam"][0]
     if isinstance(team, dict):
         team.update({
-            "Name": auditor_name,
+            "Name": auditor_name,  # 💥 精准赋给 AuditTeam 下的 Name
             "CaaNo": caa_no,
             "AuditorId": auditor_id, 
             "AuditDaysPerformed": 1.5,
@@ -356,7 +382,7 @@ def generate_json_logic(excel_file, base_data, user_data):
             else:
                 clause_docs.append({"DocumentName": doc_name})
 
-    # E. 过程清单重建
+    # E. 过程清单重建 (💥 已移除多余的 AuditorName)
     processes = []
     if not proc_df.empty:
         clause_cols = proc_df.columns[13:] if proc_df.shape[1] > 13 else []
@@ -374,8 +400,7 @@ def generate_json_logic(excel_file, base_data, user_data):
                 "RemoteProcess": "0",
                 "AuditNotes": [{
                     "Id": str(uuid.uuid4()),
-                    "AuditorId": auditor_id,
-                    "AuditorName": auditor_name # 💥 同步写入
+                    "AuditorId": auditor_id
                 }]
             }
             for col in clause_cols:
@@ -383,21 +408,18 @@ def generate_json_logic(excel_file, base_data, user_data):
             processes.append(proc_obj)
     final_json["Processes"] = processes
 
-    # F. 结果日期
+    # F. 结果日期 (💥 已移除多余的 AuditorName)
     if "Results" not in final_json: final_json["Results"] = {}
     if "AuditReportFinal" not in final_json["Results"]: final_json["Results"]["AuditReportFinal"] = {}
     
     if end_iso: final_json["Results"]["AuditReportFinal"]["Date"] = end_iso
     if next_audit_iso: final_json["Results"]["DateNextScheduledAudit"] = next_audit_iso
-    
-    # 💥 强制双重保险，同步写入 Results 下的 AuditorName
-    final_json["Results"]["AuditReportFinal"]["AuditorName"] = auditor_name
 
     return final_json
 
 # ================= 主界面 =================
-st.title("🛡️ 多模板审计转换引擎 (v46.0 逻辑防短路版)")
-st.markdown("💡 **修复日志**：彻底修复了 `english_address` 被数据库中文兜底导致短路跳过抓取的致命 BUG。同时，强制在所有层级补齐了 `AuditorName`。")
+st.title("🛡️ 多模板审计转换引擎 (v48.0 字段精准映射版)")
+st.markdown("💡 **修复日志**：移除了多余位置的 AuditorName 注入，仅精准赋值给 `AuditData` 根级与 `AuditTeam` 下的 `Name` 字段。")
 
 uploaded_files = st.file_uploader("📥 上传 Excel 数据表", type=["xlsx"], accept_multiple_files=True)
 
@@ -408,18 +430,11 @@ if uploaded_files:
             res_json = generate_json_logic(file, base_template, user_template_data)
             st.success(f"✅ {file.name} 转换成功")
             
-            with st.expander("👀 查看诊断面板 (地址与 AuditorName)", expanded=True):
+            with st.expander("👀 查看诊断面板", expanded=True):
                  st.code(f"""
-【AuditorName 生成确认】
-AuditData 级:   "{res_json.get('AuditData', {}).get('AuditorName', '缺失')}"
-AuditTeam 级:   "{safe_get(res_json.get('AuditData', {}).get('AuditTeam', [{}])[0], 'Name', '缺失')}"
-AuditReport 级: "{res_json.get('Results', {}).get('AuditReportFinal', {}).get('AuditorName', '缺失')}"
-
-【英文 Address 完美切分确认】
-Street1: "{safe_get(res_json['OrganizationInformation']['Address'], 'Street1')}"
-City:    "{safe_get(res_json['OrganizationInformation']['Address'], 'City')}"
-State:   "{safe_get(res_json['OrganizationInformation']['Address'], 'State')}"
-Country: "{safe_get(res_json['OrganizationInformation']['Address'], 'Country')}"
+【AuditorName 精准落位确认】
+AuditorName (AuditData级): "{res_json.get('AuditData', {}).get('AuditorName', '缺失')}"
+Name (AuditTeam级):        "{safe_get(res_json.get('AuditData', {}).get('AuditTeam', [{}])[0], 'Name', '缺失')}"
                  """.strip(), language="yaml")
 
             st.download_button(
