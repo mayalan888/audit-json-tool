@@ -10,7 +10,7 @@ from datetime import datetime, timedelta
 
 # --- 页面配置 ---
 st.set_page_config(
-    page_title="IATF 审计转换工具 (v45.0)",
+    page_title="IATF 审计转换工具 (v46.0)",
     page_icon="🛡️",
     layout="wide"
 )
@@ -149,13 +149,11 @@ def generate_json_logic(excel_file, base_data, user_data):
         if pd.notna(end_dt): next_audit_iso = (end_dt + timedelta(days=45)).strftime('%Y-%m-%d') + "T00:00:00.000Z"
     except: pass
 
-    # 💥 [多顾客与 CSR 动态提取]
+    # [多顾客与 CSR 动态提取]
     customers_list = []
     if not info_df.empty:
         header_r = -1
         col_map = {'cust': -1, 'name': -1, 'date': -1, 'code': -1}
-        
-        # 1. 寻找表头行
         for r in range(info_df.shape[0]):
             row_str = " ".join([str(x) for x in info_df.iloc[r, :]]).upper()
             if "CUSTOMER" in row_str and ("CSR" in row_str or "TITLE" in row_str):
@@ -168,18 +166,11 @@ def generate_json_logic(excel_file, base_data, user_data):
                     elif "供应商代码" in val or "SUPPLIER" in val or "CODE" in val: col_map['code'] = c
                 break
                 
-        # 2. 遍历表头以下的每一行，收集所有客户
         if header_r != -1:
             for r in range(header_r + 1, info_df.shape[0]):
                 cust_val = str(info_df.iloc[r, col_map['cust']]).strip() if col_map['cust'] != -1 else ""
-                
-                # 如果遇到空行跳过
-                if not cust_val or cust_val.lower() == 'nan':
-                    continue
-                
-                # 如果超出了表格范围遇到了其他表头（如审核员、姓名），及时中断扫描
-                if "审核员" in cust_val or "AUDIT" in cust_val.upper() or "NAME" in cust_val.upper():
-                    break
+                if not cust_val or cust_val.lower() == 'nan': continue
+                if "审核员" in cust_val or "AUDIT" in cust_val.upper() or "NAME" in cust_val.upper(): break
                     
                 name_val = str(info_df.iloc[r, col_map['name']]).strip() if col_map['name'] != -1 else ""
                 date_val = str(info_df.iloc[r, col_map['date']]).strip() if col_map['date'] != -1 else ""
@@ -189,7 +180,6 @@ def generate_json_logic(excel_file, base_data, user_data):
                 if date_val.lower() == 'nan': date_val = ""
                 if code_val.lower() == 'nan': code_val = ""
 
-                # 如果日期是类似 V2.0 这种非日期格式，ISO 转换会失败，此时原样保留字符
                 date_iso = fmt_iso(date_val)
                 final_date = date_iso if date_iso else date_val
 
@@ -200,7 +190,6 @@ def generate_json_logic(excel_file, base_data, user_data):
                     "DateCSRDocument": final_date
                 })
 
-    # [兜底单顾客逻辑：如果信息表没提取到，回退去数据库找一个]
     if not customers_list:
         customer_name = find_val_by_key(db_df, ["顾客", "客户名称"]) or get_db_val(29, 1)
         supplier_code = find_val_by_key(db_df, ["供应商编码", "供应商代码"]) or get_db_val(30, 1)
@@ -215,16 +204,19 @@ def generate_json_logic(excel_file, base_data, user_data):
                 "DateCSRDocument": csr_date if csr_date else csr_date_raw
             })
 
-    # [中英文地址分离]
+    # 💥 [中英文地址分离 - 已修复短路 Bug]
     def is_chinese(s): return bool(re.search(r'[\u4e00-\u9fff]', s))
     native_street, english_address = "", ""
 
+    # 1. 数据库基础兜底
     db_candidates = [get_db_val(11, 1), get_db_val(11, 4)]
     zh_cands = [c for c in db_candidates if c and is_chinese(c)]
-    if zh_cands: native_street = max(zh_cands, key=len)
     en_cands = [c for c in db_candidates if c and not is_chinese(c)]
+    if zh_cands: native_street = max(zh_cands, key=len)
     if en_cands: english_address = max(en_cands, key=len)
 
+    # 2. 信息表高优覆盖 (使用 found_in_info 标志位，防止被 native_street 误导短路)
+    found_in_info = False
     if not info_df.empty:
         for r in range(info_df.shape[0]):
             for c in range(info_df.shape[1]):
@@ -236,10 +228,12 @@ def generate_json_logic(excel_file, base_data, user_data):
                             lines = rv.replace('\r', '\n').split('\n')
                             en_lines = [l.strip() for l in lines if not is_chinese(l) and l.strip()]
                             zh_lines = [l.strip() for l in lines if is_chinese(l) and l.strip()]
+                            # 覆盖数据库提取的内容
                             if en_lines: english_address = " ".join(en_lines)
                             if zh_lines: native_street = " ".join(zh_lines)
+                            found_in_info = True
                         break
-            if english_address or native_street: break
+            if found_in_info: break
 
     street, city, state, country = english_address, "", "", ""
     if english_address:
@@ -263,6 +257,9 @@ def generate_json_logic(excel_file, base_data, user_data):
     if start_iso: final_json["AuditData"]["AuditDate"]["Start"] = start_iso
     if end_iso: final_json["AuditData"]["AuditDate"]["End"] = end_iso
     final_json["AuditData"]["CbIdentificationNo"] = find_val_by_key(db_df, ["认证机构标识号"]) or get_db_val(2, 4)
+    
+    # 💥 [赋值 AuditorName]
+    final_json["AuditData"]["AuditorName"] = auditor_name
 
     if "AuditTeam" not in final_json["AuditData"] or not isinstance(final_json["AuditData"]["AuditTeam"], list) or len(final_json["AuditData"]["AuditTeam"]) == 0:
         final_json["AuditData"]["AuditTeam"] = [{}]
@@ -311,22 +308,22 @@ def generate_json_logic(excel_file, base_data, user_data):
         "PostalCode": find_val_by_key(db_df, ["邮政编码"]) or get_db_val(10, 4)
     })
 
-    # 💥 C. 顾客与 CSR (全量重写为多客户结构)
+    # C. 顾客与 CSR 
     ensure_path(final_json, ["CustomerInformation"])
     final_json["CustomerInformation"]["Customers"] = []
     
     for c_info in customers_list:
         cust_obj = {
-            "Id": str(uuid.uuid4()), # 每个客户分配唯一 ID，符合 JSON 规范，键名不变
+            "Id": str(uuid.uuid4()),
             "Name": c_info["Name"],
             "SupplierCode": c_info["SupplierCode"],
             "Csrs": [
                 {
                     "Id": str(uuid.uuid4()), 
-                    "Name": c_info["Name"], # 要求：“Name”为”CUSTOMER客户“
-                    "SupplierCode": c_info["SupplierCode"], # 要求：“SupplierCode“为”供应商代码“
-                    "NameCSRDocument": c_info["NameCSRDocument"], # 对应 Title
-                    "DateCSRDocument": c_info["DateCSRDocument"]  # 对应 Date/Version
+                    "Name": c_info["Name"], 
+                    "SupplierCode": c_info["SupplierCode"],
+                    "NameCSRDocument": c_info["NameCSRDocument"],
+                    "DateCSRDocument": c_info["DateCSRDocument"]
                 }
             ]
         }
@@ -377,7 +374,8 @@ def generate_json_logic(excel_file, base_data, user_data):
                 "RemoteProcess": "0",
                 "AuditNotes": [{
                     "Id": str(uuid.uuid4()),
-                    "AuditorId": auditor_id
+                    "AuditorId": auditor_id,
+                    "AuditorName": auditor_name # 💥 同步写入
                 }]
             }
             for col in clause_cols:
@@ -391,12 +389,15 @@ def generate_json_logic(excel_file, base_data, user_data):
     
     if end_iso: final_json["Results"]["AuditReportFinal"]["Date"] = end_iso
     if next_audit_iso: final_json["Results"]["DateNextScheduledAudit"] = next_audit_iso
+    
+    # 💥 强制双重保险，同步写入 Results 下的 AuditorName
+    final_json["Results"]["AuditReportFinal"]["AuditorName"] = auditor_name
 
     return final_json
 
 # ================= 主界面 =================
-st.title("🛡️ 多模板审计转换引擎 (v45.0 多客户全量提取版)")
-st.markdown("💡 **功能升级**：自动扫描【信息】表中的客户名单，无论行数多少，均会自动为您在 `CustomerInformation` 下生成对应的多对象 JSON。")
+st.title("🛡️ 多模板审计转换引擎 (v46.0 逻辑防短路版)")
+st.markdown("💡 **修复日志**：彻底修复了 `english_address` 被数据库中文兜底导致短路跳过抓取的致命 BUG。同时，强制在所有层级补齐了 `AuditorName`。")
 
 uploaded_files = st.file_uploader("📥 上传 Excel 数据表", type=["xlsx"], accept_multiple_files=True)
 
@@ -407,22 +408,19 @@ if uploaded_files:
             res_json = generate_json_logic(file, base_template, user_template_data)
             st.success(f"✅ {file.name} 转换成功")
             
-            try:
-                cust_list = safe_get(res_json.get('CustomerInformation', {}), 'Customers', [])
-                cust_count = len(cust_list)
-                sample_cust = cust_list[0] if cust_count > 0 else {}
-                sample_csr = sample_cust.get('Csrs', [{}])[0] if sample_cust.get('Csrs') else {}
+            with st.expander("👀 查看诊断面板 (地址与 AuditorName)", expanded=True):
+                 st.code(f"""
+【AuditorName 生成确认】
+AuditData 级:   "{res_json.get('AuditData', {}).get('AuditorName', '缺失')}"
+AuditTeam 级:   "{safe_get(res_json.get('AuditData', {}).get('AuditTeam', [{}])[0], 'Name', '缺失')}"
+AuditReport 级: "{res_json.get('Results', {}).get('AuditReportFinal', {}).get('AuditorName', '缺失')}"
 
-                with st.expander(f"👀 查看顾客提取结果 (共提取到 {cust_count} 个顾客)", expanded=True):
-                     st.code(f"""
-【第一名顾客提取示例】
-Name:            "{safe_get(sample_cust, 'Name')}"
-SupplierCode:    "{safe_get(sample_cust, 'SupplierCode')}"
-CSR_Document:    "{safe_get(sample_csr, 'NameCSRDocument')}"
-CSR_Date/Version:"{safe_get(sample_csr, 'DateCSRDocument')}"
-                     """.strip(), language="yaml")
-            except Exception:
-                pass
+【英文 Address 完美切分确认】
+Street1: "{safe_get(res_json['OrganizationInformation']['Address'], 'Street1')}"
+City:    "{safe_get(res_json['OrganizationInformation']['Address'], 'City')}"
+State:   "{safe_get(res_json['OrganizationInformation']['Address'], 'State')}"
+Country: "{safe_get(res_json['OrganizationInformation']['Address'], 'Country')}"
+                 """.strip(), language="yaml")
 
             st.download_button(
                 label=f"📥 下载 JSON ({file.name})",
@@ -432,6 +430,7 @@ CSR_Date/Version:"{safe_get(sample_csr, 'DateCSRDocument')}"
             )
         except Exception as e:
             st.error(f"❌ {file.name} 核心处理失败: {str(e)}")
+
 
 
 
