@@ -10,7 +10,7 @@ from datetime import datetime, timedelta
 
 # --- 页面配置 ---
 st.set_page_config(
-    page_title="IATF 审计转换工具 (v51.0)",
+    page_title="IATF 审计转换工具 (v47.1 B6精准提取版)",
     page_icon="🛡️",
     layout="wide"
 )
@@ -97,10 +97,9 @@ def generate_json_logic(excel_file, base_data, user_data):
 
     # ================= 2. 数据提取 =================
     
-    # [姓名提取与处理逻辑]
+    # [姓名]
     raw_name_full = find_val_by_key(db_df, ["姓名", "Auditor Name"]) or get_db_val(5, 1)
     raw_name = raw_name_full.replace("姓名:", "").replace("Name:", "").strip() if raw_name_full else ""
-    
     auditor_name = raw_name
     english_part = re.sub(r'[\u4e00-\u9fff]', '', raw_name).strip()
     if english_part:
@@ -129,7 +128,7 @@ def generate_json_logic(excel_file, base_data, user_data):
                         if len(auditor_id) > 4: break
             if auditor_id and len(auditor_id) > 4: break
 
-    # [审核与结果日期：保持严格 ISO 格式]
+    # [日期]
     start_date_raw = find_val_by_key(db_df, ["审核开始日期", "审核开始时间"]) or get_db_val(2, 1)
     end_date_raw = find_val_by_key(db_df, ["审核结束日期", "审核结束时间"]) or get_db_val(3, 1)
     
@@ -150,7 +149,7 @@ def generate_json_logic(excel_file, base_data, user_data):
         if pd.notna(end_dt): next_audit_iso = (end_dt + timedelta(days=45)).strftime('%Y-%m-%d') + "T00:00:00.000Z"
     except: pass
 
-    # [多顾客与 CSR 动态提取：原样保留日期文本]
+    # [多顾客与 CSR 动态提取]
     customers_list = []
     if not info_df.empty:
         header_r = -1
@@ -177,7 +176,12 @@ def generate_json_logic(excel_file, base_data, user_data):
                 date_val = str(info_df.iloc[r, col_map['date']]).strip() if col_map['date'] != -1 else ""
                 code_val = str(info_df.iloc[r, col_map['code']]).strip() if col_map['code'] != -1 else ""
                 
-                final_date = date_val.replace(" 00:00:00", "").strip()
+                if name_val.lower() == 'nan': name_val = ""
+                if date_val.lower() == 'nan': date_val = ""
+                if code_val.lower() == 'nan': code_val = ""
+
+                date_iso = fmt_iso(date_val)
+                final_date = date_iso if date_iso else date_val
 
                 customers_list.append({
                     "Name": cust_val,
@@ -191,46 +195,80 @@ def generate_json_logic(excel_file, base_data, user_data):
         supplier_code = find_val_by_key(db_df, ["供应商编码", "供应商代码"]) or get_db_val(30, 1)
         csr_name = find_val_by_key(db_df, ["CSR文件名称"]) or get_db_val(31, 1)
         csr_date_raw = find_val_by_key(db_df, ["CSR文件日期"]) or get_db_val(32, 1)
-        
-        csr_date = str(csr_date_raw).replace(" 00:00:00", "").strip()
-        if csr_date.lower() == 'nan': csr_date = ""
-
+        csr_date = fmt_iso(csr_date_raw)
         if customer_name or supplier_code or csr_name:
             customers_list.append({
                 "Name": customer_name,
                 "SupplierCode": supplier_code,
                 "NameCSRDocument": csr_name,
-                "DateCSRDocument": csr_date
+                "DateCSRDocument": csr_date if csr_date else csr_date_raw
             })
 
-    # [中英文地址分离]
-    def is_chinese(s): return bool(re.search(r'[\u4e00-\u9fff]', s))
-    native_street, english_address = "", ""
+    # 💥💥💥 [终极防弹：全方位雷达提取地址] 💥💥💥
+    english_address = ""
+    native_street = ""
+    
+    # 辅助工具：提取指定关键词右侧所有邻近单元格的内容
+    def get_adjacent_cells(df, keywords):
+        cands = []
+        if df.empty: return cands
+        for r in range(df.shape[0]):
+            for c in range(df.shape[1]):
+                val = str(df.iloc[r, c]).strip().upper()
+                for k in keywords:
+                    if k.upper() in val:
+                        # 把右侧 1~4 格的内容全部抓取（防止合并单元格或串行）
+                        if c + 1 < df.shape[1]: cands.append(str(df.iloc[r, c+1]))
+                        if c + 2 < df.shape[1]: cands.append(str(df.iloc[r, c+2]))
+                        if c + 3 < df.shape[1]: cands.append(str(df.iloc[r, c+3]))
+                        if c + 4 < df.shape[1]: cands.append(str(df.iloc[r, c+4]))
+        return [str(x).strip() for x in cands if str(x).strip() and str(x).lower() != 'nan']
 
-    db_candidates = [get_db_val(11, 1), get_db_val(11, 4)]
-    zh_cands = [c for c in db_candidates if c and is_chinese(c)]
-    en_cands = [c for c in db_candidates if c and not is_chinese(c)]
-    if zh_cands: native_street = max(zh_cands, key=len)
-    if en_cands: english_address = max(en_cands, key=len)
+    # 1. 广撒网搜集所有带“地址”标签的邻居
+    raw_cands = get_adjacent_cells(info_df, ["审核地址", "AUDIT ADDRESS", "ADDRESS"]) + \
+                get_adjacent_cells(db_df, ["地址", "ADDRESS"])
+                
+    en_candidates = []
+    zh_candidates = []
 
-    found_in_info = False
-    if not info_df.empty:
-        for r in range(info_df.shape[0]):
-            for c in range(info_df.shape[1]):
-                val = str(info_df.iloc[r, c]).strip()
-                if "审核地址" in val or "Audit Address" in val:
-                    if c + 1 < info_df.shape[1]:
-                        rv = str(info_df.iloc[r, c+1]).strip()
-                        if rv and rv.lower() != 'nan':
-                            lines = rv.replace('\r', '\n').split('\n')
-                            en_lines = [l.strip() for l in lines if not is_chinese(l) and l.strip()]
-                            zh_lines = [l.strip() for l in lines if is_chinese(l) and l.strip()]
-                            if en_lines: english_address = " ".join(en_lines)
-                            if zh_lines: native_street = " ".join(zh_lines)
-                            found_in_info = True
-                        break
-            if found_in_info: break
+    # 2. 逐行剥离中英文
+    for cand in raw_cands:
+        lines = cand.replace('\r', '\n').split('\n')
+        en_parts = []
+        zh_parts = []
+        for line in lines:
+            line = line.strip()
+            if not line: continue
+            if re.search(r'[\u4e00-\u9fff]', line):
+                zh_parts.append(line)
+            elif re.search(r'[a-zA-Z]', line):  # 只要包含字母，就归为英文
+                en_parts.append(line)
+        
+        if en_parts: en_candidates.append(" ".join(en_parts))
+        if zh_parts: zh_candidates.append(" ".join(zh_parts))
 
+    # 取最长的一条，防止提取到碎片
+    english_address = max(en_candidates, key=len) if en_candidates else ""
+    native_street = max(zh_candidates, key=len) if zh_candidates else ""
+
+    # 3. 终极兜底：如果这都没提取到英文，说明表头没有写“地址”，直接全表盲搜！
+    if not english_address:
+        for df in [info_df, db_df]:
+            if df.empty: continue
+            for r in range(df.shape[0]):
+                for c in range(df.shape[1]):
+                    val = str(df.iloc[r, c]).strip()
+                    val_upper = val.upper()
+                    # 只要格子里同时出现了省份/城市，且包含英文字母
+                    if ("PROVINCE" in val_upper or "CITY" in val_upper) and re.search(r'[a-zA-Z]', val):
+                        lines = val.replace('\r', '\n').split('\n')
+                        en_parts = [l.strip() for l in lines if not re.search(r'[\u4e00-\u9fff]', l) and re.search(r'[a-zA-Z]', l)]
+                        if en_parts:
+                            cand = " ".join(en_parts)
+                            if len(cand) > len(english_address):
+                                english_address = cand
+
+    # 4. 执行倒序切分
     street, city, state, country = english_address, "", "", ""
     if english_address:
         clean_eng = english_address.replace('，', ',')
@@ -253,10 +291,7 @@ def generate_json_logic(excel_file, base_data, user_data):
     if start_iso: final_json["AuditData"]["AuditDate"]["Start"] = start_iso
     if end_iso: final_json["AuditData"]["AuditDate"]["End"] = end_iso
     final_json["AuditData"]["CbIdentificationNo"] = find_val_by_key(db_df, ["认证机构标识号"]) or get_db_val(2, 4)
-    
-    # 💥 【关键更正】：将键名精确更正为小写 auditorname
-    final_json["AuditData"]["AuditorName"] = raw_name
-    final_json["AuditData"]["auditorname"] = raw_name
+    final_json["AuditData"]["AuditorName"] = auditor_name
 
     if "AuditTeam" not in final_json["AuditData"] or not isinstance(final_json["AuditData"]["AuditTeam"], list) or len(final_json["AuditData"]["AuditTeam"]) == 0:
         final_json["AuditData"]["AuditTeam"] = [{}]
@@ -264,7 +299,7 @@ def generate_json_logic(excel_file, base_data, user_data):
     team = final_json["AuditData"]["AuditTeam"][0]
     if isinstance(team, dict):
         team.update({
-            "Name": raw_name, 
+            "Name": auditor_name,
             "CaaNo": caa_no,
             "AuditorId": auditor_id, 
             "AuditDaysPerformed": 1.5,
@@ -371,7 +406,8 @@ def generate_json_logic(excel_file, base_data, user_data):
                 "RemoteProcess": "0",
                 "AuditNotes": [{
                     "Id": str(uuid.uuid4()),
-                    "AuditorId": auditor_id
+                    "AuditorId": auditor_id,
+                    "AuditorName": auditor_name
                 }]
             }
             for col in clause_cols:
@@ -385,12 +421,17 @@ def generate_json_logic(excel_file, base_data, user_data):
     
     if end_iso: final_json["Results"]["AuditReportFinal"]["Date"] = end_iso
     if next_audit_iso: final_json["Results"]["DateNextScheduledAudit"] = next_audit_iso
+    
+    # 💥 【修改点】：直接提取数据库 B6 (索引 5,1) 并清理前缀赋给 AuditorName
+    b6_raw_val = get_db_val(5, 1)
+    b6_clean_val = b6_raw_val.replace("姓名:", "").replace("Name:", "").strip() if b6_raw_val else ""
+    final_json["Results"]["AuditReportFinal"]["AuditorName"] = b6_clean_val
 
     return final_json
 
 # ================= 主界面 =================
-st.title("🛡️ 多模板审计转换引擎 (v51.0 键名精准更正版)")
-st.markdown("💡 **修改日志**：已将 `AuditData` 下的专属姓名键严格更正为全小写的 `auditorname`。")
+st.title("🛡️ 多模板审计转换引擎 (v47.1 B6精准提取版)")
+st.markdown("💡 **修改日志**：已将 `Results` -> `AuditReportFinal` 下的 `AuditorName` 指定读取【数据库】工作表 B6 单元格的内容。")
 
 uploaded_files = st.file_uploader("📥 上传 Excel 数据表", type=["xlsx"], accept_multiple_files=True)
 
@@ -401,12 +442,17 @@ if uploaded_files:
             res_json = generate_json_logic(file, base_template, user_template_data)
             st.success(f"✅ {file.name} 转换成功")
             
-            with st.expander("👀 查看诊断面板 (姓名校验)", expanded=True):
+            with st.expander("👀 查看诊断面板 (地址与 AuditorName)", expanded=True):
                  st.code(f"""
-【原始姓名生成确认】
-AuditorName (AuditData级): "{res_json.get('AuditData', {}).get('AuditorName', '缺失')}"
-auditorname (AuditData级): "{res_json.get('AuditData', {}).get('auditorname', '缺失')}"
-Name (AuditTeam级):        "{safe_get(res_json.get('AuditData', {}).get('AuditTeam', [{}])[0], 'Name', '缺失')}"
+【AuditorName 生成确认】
+AuditData 级:   "{res_json.get('AuditData', {}).get('AuditorName', '缺失')}"
+AuditReportFinal 级 (来自B6): "{res_json.get('Results', {}).get('AuditReportFinal', {}).get('AuditorName', '缺失')}"
+
+【英文 Address 完美切分确认】
+Street1: "{safe_get(res_json['OrganizationInformation']['Address'], 'Street1')}"
+City:    "{safe_get(res_json['OrganizationInformation']['Address'], 'City')}"
+State:   "{safe_get(res_json['OrganizationInformation']['Address'], 'State')}"
+Country: "{safe_get(res_json['OrganizationInformation']['Address'], 'Country')}"
                  """.strip(), language="yaml")
 
             st.download_button(
@@ -417,6 +463,7 @@ Name (AuditTeam级):        "{safe_get(res_json.get('AuditData', {}).get('AuditT
             )
         except Exception as e:
             st.error(f"❌ {file.name} 核心处理失败: {str(e)}")
+
 
 
 
