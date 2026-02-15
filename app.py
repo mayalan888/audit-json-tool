@@ -10,7 +10,7 @@ from datetime import datetime, timedelta
 
 # --- 页面配置 ---
 st.set_page_config(
-    page_title="IATF 审计转换工具 (v47.1 B6精准提取版)",
+    page_title="IATF 审计转换工具 (v47.2 B6规范生成版)",
     page_icon="🛡️",
     layout="wide"
 )
@@ -422,16 +422,25 @@ def generate_json_logic(excel_file, base_data, user_data):
     if end_iso: final_json["Results"]["AuditReportFinal"]["Date"] = end_iso
     if next_audit_iso: final_json["Results"]["DateNextScheduledAudit"] = next_audit_iso
     
-    # 💥 【修改点】：直接提取数据库 B6 (索引 5,1) 并清理前缀赋给 AuditorName
+    # 💥 【修改点】：提取 B6，并应用相同的逻辑生成最终名字
     b6_raw_val = get_db_val(5, 1)
     b6_clean_val = b6_raw_val.replace("姓名:", "").replace("Name:", "").strip() if b6_raw_val else ""
-    final_json["Results"]["AuditReportFinal"]["AuditorName"] = b6_clean_val
+    b6_auditor_name = b6_clean_val
+    b6_english_part = re.sub(r'[\u4e00-\u9fff]', '', b6_clean_val).strip()
+    if b6_english_part:
+        parts = b6_english_part.split()
+        if len(parts) >= 2 and parts[0].isupper() and not parts[1].isupper():
+            b6_auditor_name = f"{parts[1]} {parts[0]}"
+        else:
+            b6_auditor_name = b6_english_part
+            
+    final_json["Results"]["AuditReportFinal"]["AuditorName"] = b6_auditor_name
 
     return final_json
 
 # ================= 主界面 =================
-st.title("🛡️ 多模板审计转换引擎 (v47.1 B6精准提取版)")
-st.markdown("💡 **修改日志**：已将 `Results` -> `AuditReportFinal` 下的 `AuditorName` 指定读取【数据库】工作表 B6 单元格的内容。")
+st.title("🛡️ 多模板审计转换引擎 (v47.2 B6规范生成版)")
+st.markdown("💡 **修改日志**：`Results -> AuditReportFinal -> AuditorName` 将精准读取 B6，并应用标准的英文名字生成逻辑。")
 
 uploaded_files = st.file_uploader("📥 上传 Excel 数据表", type=["xlsx"], accept_multiple_files=True)
 
@@ -446,7 +455,7 @@ if uploaded_files:
                  st.code(f"""
 【AuditorName 生成确认】
 AuditData 级:   "{res_json.get('AuditData', {}).get('AuditorName', '缺失')}"
-AuditReportFinal 级 (来自B6): "{res_json.get('Results', {}).get('AuditReportFinal', {}).get('AuditorName', '缺失')}"
+AuditReportFinal 级 (来自B6并格式化): "{res_json.get('Results', {}).get('AuditReportFinal', {}).get('AuditorName', '缺失')}"
 
 【英文 Address 完美切分确认】
 Street1: "{safe_get(res_json['OrganizationInformation']['Address'], 'Street1')}"
@@ -463,17 +472,3 @@ Country: "{safe_get(res_json['OrganizationInformation']['Address'], 'Country')}"
             )
         except Exception as e:
             st.error(f"❌ {file.name} 核心处理失败: {str(e)}")
-
-
-
-
-
-
-
-
-
-
-
-
-
-
