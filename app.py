@@ -10,7 +10,7 @@ from datetime import datetime, timedelta
 
 # --- 页面配置 ---
 st.set_page_config(
-    page_title="IATF 审计转换工具 (v47.2 B6规范生成版)",
+    page_title="IATF 审计转换工具 (v47.3 暴力提取名字版)",
     page_icon="🛡️",
     layout="wide"
 )
@@ -97,15 +97,27 @@ def generate_json_logic(excel_file, base_data, user_data):
 
     # ================= 2. 数据提取 =================
     
-    # [姓名]
+    # 💥 [辅助函数：暴力剥离所有非英文字母，并重排大小写]
+    def extract_and_format_english_name(raw_val):
+        clean_val = str(raw_val).replace("姓名:", "").replace("Name:", "").strip()
+        if not clean_val: return ""
+        
+        # 强制将除了英文字母和空格以外的所有字符（包括中文、括号、数字、全角符号）全部替换为空格
+        eng_only = re.sub(r'[^a-zA-Z\s]', ' ', clean_val).strip()
+        # 合并可能产生的多余空格
+        eng_only = re.sub(r'\s+', ' ', eng_only)
+        
+        if eng_only:
+            parts = eng_only.split()
+            if len(parts) >= 2 and parts[0].isupper() and not parts[1].isupper():
+                return f"{parts[1]} {parts[0]}"
+            else:
+                return eng_only
+        return clean_val # 如果完全没有字母，则退回原样
+
+    # [全局姓名]
     raw_name_full = find_val_by_key(db_df, ["姓名", "Auditor Name"]) or get_db_val(5, 1)
-    raw_name = raw_name_full.replace("姓名:", "").replace("Name:", "").strip() if raw_name_full else ""
-    auditor_name = raw_name
-    english_part = re.sub(r'[\u4e00-\u9fff]', '', raw_name).strip()
-    if english_part:
-        parts = english_part.split()
-        if len(parts) >= 2 and parts[0].isupper() and not parts[1].isupper(): auditor_name = f"{parts[1]} {parts[0]}"
-        else: auditor_name = english_part
+    auditor_name = extract_and_format_english_name(raw_name_full)
 
     # [CCAA]
     ccaa_raw = find_val_by_key(db_df, ["审核员CCAA", "CCAA"]) or get_db_val(4, 1)
@@ -204,11 +216,10 @@ def generate_json_logic(excel_file, base_data, user_data):
                 "DateCSRDocument": csr_date if csr_date else csr_date_raw
             })
 
-    # 💥💥💥 [终极防弹：全方位雷达提取地址] 💥💥💥
+    # [终极防弹地址扫描]
     english_address = ""
     native_street = ""
     
-    # 辅助工具：提取指定关键词右侧所有邻近单元格的内容
     def get_adjacent_cells(df, keywords):
         cands = []
         if df.empty: return cands
@@ -217,21 +228,18 @@ def generate_json_logic(excel_file, base_data, user_data):
                 val = str(df.iloc[r, c]).strip().upper()
                 for k in keywords:
                     if k.upper() in val:
-                        # 把右侧 1~4 格的内容全部抓取（防止合并单元格或串行）
                         if c + 1 < df.shape[1]: cands.append(str(df.iloc[r, c+1]))
                         if c + 2 < df.shape[1]: cands.append(str(df.iloc[r, c+2]))
                         if c + 3 < df.shape[1]: cands.append(str(df.iloc[r, c+3]))
                         if c + 4 < df.shape[1]: cands.append(str(df.iloc[r, c+4]))
         return [str(x).strip() for x in cands if str(x).strip() and str(x).lower() != 'nan']
 
-    # 1. 广撒网搜集所有带“地址”标签的邻居
     raw_cands = get_adjacent_cells(info_df, ["审核地址", "AUDIT ADDRESS", "ADDRESS"]) + \
                 get_adjacent_cells(db_df, ["地址", "ADDRESS"])
                 
     en_candidates = []
     zh_candidates = []
 
-    # 2. 逐行剥离中英文
     for cand in raw_cands:
         lines = cand.replace('\r', '\n').split('\n')
         en_parts = []
@@ -241,17 +249,15 @@ def generate_json_logic(excel_file, base_data, user_data):
             if not line: continue
             if re.search(r'[\u4e00-\u9fff]', line):
                 zh_parts.append(line)
-            elif re.search(r'[a-zA-Z]', line):  # 只要包含字母，就归为英文
+            elif re.search(r'[a-zA-Z]', line):
                 en_parts.append(line)
         
         if en_parts: en_candidates.append(" ".join(en_parts))
         if zh_parts: zh_candidates.append(" ".join(zh_parts))
 
-    # 取最长的一条，防止提取到碎片
     english_address = max(en_candidates, key=len) if en_candidates else ""
     native_street = max(zh_candidates, key=len) if zh_candidates else ""
 
-    # 3. 终极兜底：如果这都没提取到英文，说明表头没有写“地址”，直接全表盲搜！
     if not english_address:
         for df in [info_df, db_df]:
             if df.empty: continue
@@ -259,7 +265,6 @@ def generate_json_logic(excel_file, base_data, user_data):
                 for c in range(df.shape[1]):
                     val = str(df.iloc[r, c]).strip()
                     val_upper = val.upper()
-                    # 只要格子里同时出现了省份/城市，且包含英文字母
                     if ("PROVINCE" in val_upper or "CITY" in val_upper) and re.search(r'[a-zA-Z]', val):
                         lines = val.replace('\r', '\n').split('\n')
                         en_parts = [l.strip() for l in lines if not re.search(r'[\u4e00-\u9fff]', l) and re.search(r'[a-zA-Z]', l)]
@@ -268,7 +273,6 @@ def generate_json_logic(excel_file, base_data, user_data):
                             if len(cand) > len(english_address):
                                 english_address = cand
 
-    # 4. 执行倒序切分
     street, city, state, country = english_address, "", "", ""
     if english_address:
         clean_eng = english_address.replace('，', ',')
@@ -422,25 +426,16 @@ def generate_json_logic(excel_file, base_data, user_data):
     if end_iso: final_json["Results"]["AuditReportFinal"]["Date"] = end_iso
     if next_audit_iso: final_json["Results"]["DateNextScheduledAudit"] = next_audit_iso
     
-    # 💥 【修改点】：提取 B6，并应用相同的逻辑生成最终名字
+    # 💥 【修改点】：提取 B6，并应用最强壮的“暴力英文提取”格式化逻辑
     b6_raw_val = get_db_val(5, 1)
-    b6_clean_val = b6_raw_val.replace("姓名:", "").replace("Name:", "").strip() if b6_raw_val else ""
-    b6_auditor_name = b6_clean_val
-    b6_english_part = re.sub(r'[\u4e00-\u9fff]', '', b6_clean_val).strip()
-    if b6_english_part:
-        parts = b6_english_part.split()
-        if len(parts) >= 2 and parts[0].isupper() and not parts[1].isupper():
-            b6_auditor_name = f"{parts[1]} {parts[0]}"
-        else:
-            b6_auditor_name = b6_english_part
-            
-    final_json["Results"]["AuditReportFinal"]["AuditorName"] = b6_auditor_name
+    b6_formatted_name = extract_and_format_english_name(b6_raw_val)
+    final_json["Results"]["AuditReportFinal"]["AuditorName"] = b6_formatted_name
 
     return final_json
 
 # ================= 主界面 =================
-st.title("🛡️ 多模板审计转换引擎 (v47.2 B6规范生成版)")
-st.markdown("💡 **修改日志**：`Results -> AuditReportFinal -> AuditorName` 将精准读取 B6，并应用标准的英文名字生成逻辑。")
+st.title("🛡️ 多模板审计转换引擎 (v47.3 暴力提取名字版)")
+st.markdown("💡 **修改日志**：已彻底解决中文标点符号和全角空格干扰的问题。现在 B6 提取出来的名字必定会被清理得干干净净，并正确重排大小写。")
 
 uploaded_files = st.file_uploader("📥 上传 Excel 数据表", type=["xlsx"], accept_multiple_files=True)
 
@@ -455,7 +450,7 @@ if uploaded_files:
                  st.code(f"""
 【AuditorName 生成确认】
 AuditData 级:   "{res_json.get('AuditData', {}).get('AuditorName', '缺失')}"
-AuditReportFinal 级 (来自B6并格式化): "{res_json.get('Results', {}).get('AuditReportFinal', {}).get('AuditorName', '缺失')}"
+AuditReportFinal 级 (来自B6并强力格式化): "{res_json.get('Results', {}).get('AuditReportFinal', {}).get('AuditorName', '缺失')}"
 
 【英文 Address 完美切分确认】
 Street1: "{safe_get(res_json['OrganizationInformation']['Address'], 'Street1')}"
@@ -472,3 +467,4 @@ Country: "{safe_get(res_json['OrganizationInformation']['Address'], 'Country')}"
             )
         except Exception as e:
             st.error(f"❌ {file.name} 核心处理失败: {str(e)}")
+
