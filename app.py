@@ -10,7 +10,7 @@ from datetime import datetime, timedelta
 
 # --- 页面配置 ---
 st.set_page_config(
-    page_title="IATF 审计转换工具 (v47.3 暴力提取名字版)",
+    page_title="IATF 审计转换工具 (v52.0 终极融合版)",
     page_icon="🛡️",
     layout="wide"
 )
@@ -102,9 +102,7 @@ def generate_json_logic(excel_file, base_data, user_data):
         clean_val = str(raw_val).replace("姓名:", "").replace("Name:", "").strip()
         if not clean_val: return ""
         
-        # 强制将除了英文字母和空格以外的所有字符（包括中文、括号、数字、全角符号）全部替换为空格
         eng_only = re.sub(r'[^a-zA-Z\s]', ' ', clean_val).strip()
-        # 合并可能产生的多余空格
         eng_only = re.sub(r'\s+', ' ', eng_only)
         
         if eng_only:
@@ -113,11 +111,11 @@ def generate_json_logic(excel_file, base_data, user_data):
                 return f"{parts[1]} {parts[0]}"
             else:
                 return eng_only
-        return clean_val # 如果完全没有字母，则退回原样
+        return clean_val
 
-    # [全局姓名]
+    # [全局姓名：保持原始中文不处理，供 AuditData 使用]
     raw_name_full = find_val_by_key(db_df, ["姓名", "Auditor Name"]) or get_db_val(5, 1)
-    auditor_name = extract_and_format_english_name(raw_name_full)
+    raw_name = raw_name_full.replace("姓名:", "").replace("Name:", "").strip() if raw_name_full else ""
 
     # [CCAA]
     ccaa_raw = find_val_by_key(db_df, ["审核员CCAA", "CCAA"]) or get_db_val(4, 1)
@@ -140,7 +138,7 @@ def generate_json_logic(excel_file, base_data, user_data):
                         if len(auditor_id) > 4: break
             if auditor_id and len(auditor_id) > 4: break
 
-    # [日期]
+    # [审核与结果日期：标准ISO格式]
     start_date_raw = find_val_by_key(db_df, ["审核开始日期", "审核开始时间"]) or get_db_val(2, 1)
     end_date_raw = find_val_by_key(db_df, ["审核结束日期", "审核结束时间"]) or get_db_val(3, 1)
     
@@ -161,7 +159,7 @@ def generate_json_logic(excel_file, base_data, user_data):
         if pd.notna(end_dt): next_audit_iso = (end_dt + timedelta(days=45)).strftime('%Y-%m-%d') + "T00:00:00.000Z"
     except: pass
 
-    # [多顾客与 CSR 动态提取]
+    # 💥 [多顾客与 CSR 动态提取：恢复原样粘贴逻辑！]
     customers_list = []
     if not info_df.empty:
         header_r = -1
@@ -192,8 +190,8 @@ def generate_json_logic(excel_file, base_data, user_data):
                 if date_val.lower() == 'nan': date_val = ""
                 if code_val.lower() == 'nan': code_val = ""
 
-                date_iso = fmt_iso(date_val)
-                final_date = date_iso if date_iso else date_val
+                # 仅仅剔除时间尾巴，不进行任何 ISO 转换
+                final_date = date_val.replace(" 00:00:00", "").strip()
 
                 customers_list.append({
                     "Name": cust_val,
@@ -207,13 +205,17 @@ def generate_json_logic(excel_file, base_data, user_data):
         supplier_code = find_val_by_key(db_df, ["供应商编码", "供应商代码"]) or get_db_val(30, 1)
         csr_name = find_val_by_key(db_df, ["CSR文件名称"]) or get_db_val(31, 1)
         csr_date_raw = find_val_by_key(db_df, ["CSR文件日期"]) or get_db_val(32, 1)
-        csr_date = fmt_iso(csr_date_raw)
+        
+        # 兜底逻辑同样只剔除尾巴
+        csr_date = str(csr_date_raw).replace(" 00:00:00", "").strip()
+        if csr_date.lower() == 'nan': csr_date = ""
+        
         if customer_name or supplier_code or csr_name:
             customers_list.append({
                 "Name": customer_name,
                 "SupplierCode": supplier_code,
                 "NameCSRDocument": csr_name,
-                "DateCSRDocument": csr_date if csr_date else csr_date_raw
+                "DateCSRDocument": csr_date
             })
 
     # [终极防弹地址扫描]
@@ -295,7 +297,10 @@ def generate_json_logic(excel_file, base_data, user_data):
     if start_iso: final_json["AuditData"]["AuditDate"]["Start"] = start_iso
     if end_iso: final_json["AuditData"]["AuditDate"]["End"] = end_iso
     final_json["AuditData"]["CbIdentificationNo"] = find_val_by_key(db_df, ["认证机构标识号"]) or get_db_val(2, 4)
-    final_json["AuditData"]["AuditorName"] = auditor_name
+    
+    # 💥 AuditorName 全局赋值（原样）
+    final_json["AuditData"]["AuditorName"] = raw_name
+    final_json["AuditData"]["auditorname"] = raw_name
 
     if "AuditTeam" not in final_json["AuditData"] or not isinstance(final_json["AuditData"]["AuditTeam"], list) or len(final_json["AuditData"]["AuditTeam"]) == 0:
         final_json["AuditData"]["AuditTeam"] = [{}]
@@ -303,7 +308,7 @@ def generate_json_logic(excel_file, base_data, user_data):
     team = final_json["AuditData"]["AuditTeam"][0]
     if isinstance(team, dict):
         team.update({
-            "Name": auditor_name,
+            "Name": raw_name,
             "CaaNo": caa_no,
             "AuditorId": auditor_id, 
             "AuditDaysPerformed": 1.5,
@@ -410,8 +415,7 @@ def generate_json_logic(excel_file, base_data, user_data):
                 "RemoteProcess": "0",
                 "AuditNotes": [{
                     "Id": str(uuid.uuid4()),
-                    "AuditorId": auditor_id,
-                    "AuditorName": auditor_name
+                    "AuditorId": auditor_id
                 }]
             }
             for col in clause_cols:
@@ -426,7 +430,7 @@ def generate_json_logic(excel_file, base_data, user_data):
     if end_iso: final_json["Results"]["AuditReportFinal"]["Date"] = end_iso
     if next_audit_iso: final_json["Results"]["DateNextScheduledAudit"] = next_audit_iso
     
-    # 💥 【修改点】：提取 B6，并应用最强壮的“暴力英文提取”格式化逻辑
+    # 💥 B6提取并强制执行英文格式化
     b6_raw_val = get_db_val(5, 1)
     b6_formatted_name = extract_and_format_english_name(b6_raw_val)
     final_json["Results"]["AuditReportFinal"]["AuditorName"] = b6_formatted_name
@@ -434,8 +438,8 @@ def generate_json_logic(excel_file, base_data, user_data):
     return final_json
 
 # ================= 主界面 =================
-st.title("🛡️ 多模板审计转换引擎 (v47.3 暴力提取名字版)")
-st.markdown("💡 **修改日志**：已彻底解决中文标点符号和全角空格干扰的问题。现在 B6 提取出来的名字必定会被清理得干干净净，并正确重排大小写。")
+st.title("🛡️ 多模板审计转换引擎 (v52.0 终极融合版)")
+st.markdown("💡 **最新修复**：CSR 日期恢复为**原样提取（不再强转 ISO）**；B6 提取姓名执行暴力英文排版；`auditorname` 保留原始中文；全表地址雷达正常运作。")
 
 uploaded_files = st.file_uploader("📥 上传 Excel 数据表", type=["xlsx"], accept_multiple_files=True)
 
@@ -446,17 +450,24 @@ if uploaded_files:
             res_json = generate_json_logic(file, base_template, user_template_data)
             st.success(f"✅ {file.name} 转换成功")
             
-            with st.expander("👀 查看诊断面板 (地址与 AuditorName)", expanded=True):
+            with st.expander("👀 查看诊断面板", expanded=True):
+                 try:
+                     cust_list = safe_get(res_json.get('CustomerInformation', {}), 'Customers', [])
+                     sample_csr = cust_list[0].get('Csrs', [{}])[0] if cust_list and cust_list[0].get('Csrs') else {}
+                     csr_date_val = safe_get(sample_csr, 'DateCSRDocument')
+                 except:
+                     csr_date_val = "缺失"
+                     
                  st.code(f"""
-【AuditorName 生成确认】
-AuditData 级:   "{res_json.get('AuditData', {}).get('AuditorName', '缺失')}"
-AuditReportFinal 级 (来自B6并强力格式化): "{res_json.get('Results', {}).get('AuditReportFinal', {}).get('AuditorName', '缺失')}"
+【CSR 原始日期验证】
+DateCSRDocument: "{csr_date_val}"
 
-【英文 Address 完美切分确认】
+【AuditorName 生成确认】
+auditorname (AuditData级 - 原始): "{res_json.get('AuditData', {}).get('auditorname', '缺失')}"
+AuditorName (AuditReportFinal - B6英文): "{res_json.get('Results', {}).get('AuditReportFinal', {}).get('AuditorName', '缺失')}"
+
+【英文 Address 确认】
 Street1: "{safe_get(res_json['OrganizationInformation']['Address'], 'Street1')}"
-City:    "{safe_get(res_json['OrganizationInformation']['Address'], 'City')}"
-State:   "{safe_get(res_json['OrganizationInformation']['Address'], 'State')}"
-Country: "{safe_get(res_json['OrganizationInformation']['Address'], 'Country')}"
                  """.strip(), language="yaml")
 
             st.download_button(
@@ -467,4 +478,5 @@ Country: "{safe_get(res_json['OrganizationInformation']['Address'], 'Country')}"
             )
         except Exception as e:
             st.error(f"❌ {file.name} 核心处理失败: {str(e)}")
+
 
