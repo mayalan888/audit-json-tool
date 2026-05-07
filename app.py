@@ -11,7 +11,7 @@ from datetime import datetime, timedelta
 # 页面配置
 # =====================================================================
 st.set_page_config(
-    page_title="IATF 审计转换工具 (v69.0 文件清单修复版)",
+    page_title="IATF 审计转换工具 (v70.0 完整 KPI 修复版)",
     page_icon="🛡️",
     layout="wide"
 )
@@ -28,8 +28,8 @@ with st.sidebar:
         "请根据报告类型选择：",
         (
             "纯净标准模式 (无附属场所)", 
-            "单提取：EMS 扩展场所", 
-            "单提取：RL 支持场所",
+            "单提取：EMS 扩展场所 (F21-M25)", 
+            "单提取：RL 支持场所 (F27-N32)",
             "全量综合模式 (提取 EMS + RL + 被支持场所)"
         ),
         index=0
@@ -324,7 +324,10 @@ def generate_json_logic(excel_file, base_data, mode):
         proc_df = pd.read_excel(xls, sheet_name='过程清单') if '过程清单' in xls.sheet_names else pd.DataFrame()
         info_df = pd.read_excel(xls, sheet_name='信息', header=None) if '信息' in xls.sheet_names else pd.DataFrame()
         
-        # 💥 优化：主动按名字寻找“文件清单”，找不到再用备用逻辑
+        # 获取过程绩效表
+        perf_df = pd.read_excel(xls, sheet_name='过程绩效', header=None) if '过程绩效' in xls.sheet_names else pd.DataFrame()
+        
+        # 主动按名字寻找“文件清单”，找不到再用备用逻辑
         if '文件清单' in xls.sheet_names:
             doc_list_df = pd.read_excel(xls, sheet_name='文件清单', header=None)
         else:
@@ -384,6 +387,75 @@ def generate_json_logic(excel_file, base_data, mode):
         return ""
         
     start_iso, end_iso = fmt_iso(start_date_raw), fmt_iso(end_date_raw)
+
+    # 💥💥💥 [新增：过程绩效(KPI)精细化提取逻辑] 💥💥💥
+    kpi_map = {}
+    time_period = ""
+    
+    if not perf_df.empty:
+        # F2 单元格为时间周期，对应 iloc[1, 5] (row 1, col 5)
+        if perf_df.shape[0] > 1 and perf_df.shape[1] > 5:
+            raw_time = str(perf_df.iloc[1, 5]).strip()
+            time_period = fmt_iso(raw_time)
+            
+        header_r = -1
+        col_map = {'proc': -1, 'kpi': -1, 'target': -1, 'result': -1, 'trend': -1}
+        
+        # 寻找表头
+        for r in range(min(10, perf_df.shape[0])):
+            for c in range(perf_df.shape[1]):
+                val = str(perf_df.iloc[r, c]).strip().upper()
+                if val == "过程" or "KPI名称" in val:
+                    header_r = r
+                    for scan_c in range(perf_df.shape[1]):
+                        h_val = str(perf_df.iloc[r, scan_c]).strip().upper()
+                        if "过程" == h_val or "PROCESS" in h_val: col_map['proc'] = scan_c
+                        elif "KPI" in h_val or "指标" in h_val: col_map['kpi'] = scan_c
+                        elif "目标" in h_val or "TARGET" in h_val: col_map['target'] = scan_c
+                        elif "结果" in h_val or "RESULT" in h_val: col_map['result'] = scan_c
+                        elif "趋势" in h_val or "TREND" in h_val: col_map['trend'] = scan_c
+                    break
+            if header_r != -1: break
+            
+        # 提取数据
+        if header_r != -1:
+            current_process = ""
+            for r in range(header_r + 1, perf_df.shape[0]):
+                proc_val = str(perf_df.iloc[r, col_map['proc']]).strip() if col_map.get('proc', -1) != -1 else ""
+                
+                # 更新当前正在扫描的过程名称（兼容合并单元格/留空写法）
+                if proc_val and proc_val.lower() != 'nan':
+                    current_process = proc_val
+                    
+                kpi_val = str(perf_df.iloc[r, col_map['kpi']]).strip() if col_map.get('kpi', -1) != -1 else ""
+                if not kpi_val or kpi_val.lower() == 'nan':
+                    continue  # 跳过没有填 KPI 名称的空行
+                    
+                target_val = str(perf_df.iloc[r, col_map['target']]).strip() if col_map.get('target', -1) != -1 else ""
+                result_val = str(perf_df.iloc[r, col_map['result']]).strip() if col_map.get('result', -1) != -1 else ""
+                trend_val = str(perf_df.iloc[r, col_map['trend']]).strip() if col_map.get('trend', -1) != -1 else ""
+                
+                # 转换趋势语言
+                trend_mapped = "0"
+                if "积极" in trend_val or "1" == trend_val: trend_mapped = "1"
+                elif "消极" in trend_val or "-1" == trend_val: trend_mapped = "-1"
+                elif "一贯" in trend_val or "0" == trend_val: trend_mapped = "0"
+                else: trend_mapped = trend_val if trend_val and trend_val.lower() != 'nan' else "0"
+                
+                target_val = "" if target_val.lower() == 'nan' else target_val
+                result_val = "" if result_val.lower() == 'nan' else result_val
+                
+                if current_process not in kpi_map:
+                    kpi_map[current_process] = []
+                    
+                kpi_map[current_process].append({
+                    "KPI": kpi_val,
+                    "CurrentTarget": target_val,
+                    "Results": result_val,
+                    "TrendLastAudit": trend_mapped,
+                    "TimePeriodFrom": time_period
+                })
+    # ==============================================================
     
     next_audit_iso = ""
     try:
@@ -561,9 +633,7 @@ def generate_json_logic(excel_file, base_data, mode):
         org["AddressNative"]["PostalCode"] = postal_code
         org["Address"]["PostalCode"] = postal_code
 
-    # =====================================================================
     # 根据模式拔插模块
-    # =====================================================================
     if "全量综合模式" in mode:
         ems_sites = extract_ems_sites(info_df)
         if ems_sites:
@@ -607,13 +677,11 @@ def generate_json_logic(excel_file, base_data, mode):
         }
         final_json["CustomerInformation"]["Customers"].append(cust_obj)
 
-    # 💥💥💥 [重构：文件清单精准映射抓取逻辑] 💥💥💥
     doc_map = {}
     if not doc_list_df.empty:
         clause_col = -1
         doc_col = -1
         header_r = -1
-        # 寻找“条款”列和“名称”列
         for r in range(min(10, doc_list_df.shape[0])):
             for c in range(doc_list_df.shape[1]):
                 val = str(doc_list_df.iloc[r, c]).strip()
@@ -630,45 +698,54 @@ def generate_json_logic(excel_file, base_data, mode):
                 clause_val = str(doc_list_df.iloc[r, clause_col]).strip()
                 if not clause_val or clause_val.lower() == 'nan': continue
                 
-                # 仅提取最前面的数字和点 (如 "4.4.1.2产品安全" -> "4.4.1.2")
                 match = re.match(r'^([\d\.]+)', clause_val)
                 if match:
                     clause_no = match.group(1)
                     if clause_no.endswith('.'): clause_no = clause_no[:-1]
                     
                     doc_parts = []
-                    # 动态合并被分在连续3列里的内容：名称、编号、版本
                     for dc in range(doc_col, min(doc_col + 3, doc_list_df.shape[1])):
                         part_val = str(doc_list_df.iloc[r, dc]).strip()
                         if part_val and part_val.lower() != 'nan':
                             doc_parts.append(part_val)
                     
                     if doc_parts:
-                        # 用空格拼接，更符合阅读习惯
                         doc_map[clause_no] = " ".join(doc_parts)
 
-    # 将映射后的文件清单精准注射进 JSON 骨架
     if doc_map and "Stage1DocumentedRequirements" in final_json and "IatfClauseDocuments" in final_json["Stage1DocumentedRequirements"]:
         clause_docs = final_json["Stage1DocumentedRequirements"]["IatfClauseDocuments"]
         for i in range(len(clause_docs)):
             if isinstance(clause_docs[i], dict):
                 p_no = str(clause_docs[i].get("ProcessNo", ""))
-                # 如果这个条款号在字典中找到了对应提取出来的文件信息，就更新覆盖
                 if p_no in doc_map:
                     clause_docs[i]["DocumentName"] = doc_map[p_no]
 
+    # 💥💥 [核心修改：创建过程的同时注入匹配的 KPI] 💥💥
     processes = []
+    total_kpis_mapped = 0
     if not proc_df.empty:
         clause_cols = proc_df.columns[13:] if proc_df.shape[1] > 13 else []
         for idx, row in proc_df.iterrows():
             p_name = str(row.iloc[0]).strip()
             rep_name = str(row.iloc[2]).strip() if pd.notna(row.iloc[2]) else ""
             if not p_name or p_name.lower() == 'nan': continue
+            
             proc_obj = {
                 "Id": str(uuid.uuid4()), "ProcessName": p_name, "RepresentativeName": rep_name,
                 "ManufacturingProcess": "0", "OnSiteProcess": "1", "RemoteProcess": "0",
-                "AuditNotes": [{"Id": str(uuid.uuid4()), "AuditorId": auditor_id, "AuditorName": raw_name}]
+                "AuditNotes": [{"Id": str(uuid.uuid4()), "AuditorId": auditor_id, "AuditorName": raw_name}],
+                "ProcessPerformance": []
             }
+            
+            # 为当前过程匹配 KPI
+            clean_p_name = re.sub(r'\s+', '', p_name)
+            for k, v_list in kpi_map.items():
+                clean_k = re.sub(r'\s+', '', k)
+                if clean_p_name == clean_k or clean_k in clean_p_name or clean_p_name in clean_k:
+                    proc_obj["ProcessPerformance"] = copy.deepcopy(v_list)
+                    total_kpis_mapped += len(v_list)
+                    break
+            
             for col in clause_cols:
                 if str(row[col]).strip().upper() in ['X', 'TRUE']: proc_obj[col] = True
             processes.append(proc_obj)
@@ -683,14 +760,13 @@ def generate_json_logic(excel_file, base_data, mode):
     b6_formatted_name = extract_and_format_english_name(b6_raw_val)
     final_json["Results"]["AuditReportFinal"]["AuditorName"] = b6_formatted_name
 
-    # 附带回传提取到的文件个数以供界面显示
-    return final_json, len(doc_map)
+    return final_json, len(doc_map), total_kpis_mapped
 
 # =====================================================================
 # 主界面展示区
 # =====================================================================
 
-st.title("🛡️ 多模板审计转换引擎 (v69.0 文件清单终极修复版)")
+st.title("🛡️ 多模板审计转换引擎 (v70.0 KPI 注入修复版)")
 st.markdown(f"💡 **当前运行模式**: `{run_mode}`")
 
 st.markdown("### 📥 上传数据源")
@@ -701,7 +777,7 @@ if uploaded_files:
     
     for file in uploaded_files:
         try:
-            res_json, mapped_doc_count = generate_json_logic(file, base_template_data, run_mode)
+            res_json, mapped_doc_count, mapped_kpi_count = generate_json_logic(file, base_template_data, run_mode)
             st.success(f"✅ 解析成功：{file.name}")
             
             row_col1, row_col2 = st.columns([3, 1])
@@ -717,7 +793,8 @@ if uploaded_files:
 ✅ EMS扩展场所提取: {ems_count} 个
 ✅ RL支持场所提取 : {rl_count} 个
 ✅ 被支持场所提取 : {rec_count} 个
-✅ 文件清单精准映射: {mapped_doc_count} 条 (已对应填入JSON)
+✅ 文件清单精准映射: {mapped_doc_count} 条
+✅ 过程绩效(KPI)分配: {mapped_kpi_count} 条 (已全部无缝注入对应过程)
 标志位(EMS): "{res_json.get('OrganizationInformation', {}).get('ExtendedManufacturingSite', '缺失')}"
                          """.strip(), language="yaml")
                          
@@ -732,7 +809,8 @@ if uploaded_files:
 [模块: EMS扩展场所]
 提取数量: {ems_count} 个
 场所名称: "{safe_get(ems_sample, 'SiteName', '无')}"
-文件映射: {mapped_doc_count} 条
+文件清单映射: {mapped_doc_count} 条
+过程绩效(KPI)分配: {mapped_kpi_count} 条
 标志位: "{res_json.get('OrganizationInformation', {}).get('ExtendedManufacturingSite', '缺失')}"
                          """.strip(), language="yaml")
                          
@@ -747,7 +825,8 @@ if uploaded_files:
 [模块: RL支持场所]
 提取数量: {rl_count} 个
 场所名称: "{safe_get(rl_sample, 'SiteName', '无')}"
-文件映射: {mapped_doc_count} 条
+文件清单映射: {mapped_doc_count} 条
+过程绩效(KPI)分配: {mapped_kpi_count} 条
                          """.strip(), language="yaml")
                          
                      else:
@@ -755,6 +834,7 @@ if uploaded_files:
 [模块: 纯净标准]
 中文主地址: "{safe_get(res_json.get('OrganizationInformation', {}).get('AddressNative', {}), 'Street1', '缺失')}"
 文件清单映射: {mapped_doc_count} 条目已准确写入
+过程绩效(KPI)分配: {mapped_kpi_count} 条目已精准挂载至相应过程
                          """.strip(), language="yaml")
 
             with row_col2:
@@ -766,25 +846,3 @@ if uploaded_files:
                 )
         except Exception as e:
             st.error(f"❌ 解析 {file.name} 失败: {str(e)}")
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
