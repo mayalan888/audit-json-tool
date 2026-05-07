@@ -11,7 +11,7 @@ from datetime import datetime, timedelta
 # 页面配置
 # =====================================================================
 st.set_page_config(
-    page_title="IATF 审计转换工具 (v70.0 完整 KPI 修复版)",
+    page_title="IATF 审计转换工具 (v70.1 KPI全量修复版)",
     page_icon="🛡️",
     layout="wide"
 )
@@ -388,7 +388,7 @@ def generate_json_logic(excel_file, base_data, mode):
         
     start_iso, end_iso = fmt_iso(start_date_raw), fmt_iso(end_date_raw)
 
-    # 💥💥💥 [新增：过程绩效(KPI)精细化提取逻辑] 💥💥💥
+    # 💥💥💥 [新增与修复：过程绩效(KPI)精细化提取逻辑，加入防覆写机制] 💥💥💥
     kpi_map = {}
     time_period = ""
     
@@ -409,11 +409,17 @@ def generate_json_logic(excel_file, base_data, mode):
                     header_r = r
                     for scan_c in range(perf_df.shape[1]):
                         h_val = str(perf_df.iloc[r, scan_c]).strip().upper()
-                        if "过程" == h_val or "PROCESS" in h_val: col_map['proc'] = scan_c
-                        elif "KPI" in h_val or "指标" in h_val: col_map['kpi'] = scan_c
-                        elif "目标" in h_val or "TARGET" in h_val: col_map['target'] = scan_c
-                        elif "结果" in h_val or "RESULT" in h_val: col_map['result'] = scan_c
-                        elif "趋势" in h_val or "TREND" in h_val: col_map['trend'] = scan_c
+                        # 新增防覆写锁：只有当值为 -1 (未分配) 时才进行绑定
+                        if ("过程" == h_val or "PROCESS" in h_val) and col_map['proc'] == -1: 
+                            col_map['proc'] = scan_c
+                        elif ("KPI" in h_val or "指标" in h_val) and col_map['kpi'] == -1: 
+                            col_map['kpi'] = scan_c
+                        elif ("目标" in h_val or "TARGET" in h_val) and col_map['target'] == -1: 
+                            col_map['target'] = scan_c
+                        elif ("结果" in h_val or "RESULT" in h_val) and col_map['result'] == -1: 
+                            col_map['result'] = scan_c
+                        elif ("趋势" in h_val or "TREND" in h_val) and col_map['trend'] == -1: 
+                            col_map['trend'] = scan_c
                     break
             if header_r != -1: break
             
@@ -534,7 +540,7 @@ def generate_json_logic(excel_file, base_data, mode):
     cands += get_anchored(info_df, ["审核地址", "AUDIT ADDRESS", "ADDRESS"])
     cands += get_anchored(db_df, ["地址", "ADDRESS"])
     
-    en_parts, zh_parts = [], []
+    en_parts, zh_parts = [] , []
     for cand in cands:
         cand = str(cand).strip()
         if not cand or cand.lower() == 'nan': continue
@@ -766,7 +772,7 @@ def generate_json_logic(excel_file, base_data, mode):
 # 主界面展示区
 # =====================================================================
 
-st.title("🛡️ 多模板审计转换引擎 (v70.0 KPI 注入修复版)")
+st.title("🛡️ 多模板审计转换引擎 (v70.1 KPI全量修复版)")
 st.markdown(f"💡 **当前运行模式**: `{run_mode}`")
 
 st.markdown("### 📥 上传数据源")
