@@ -11,7 +11,7 @@ from datetime import datetime, timedelta
 # 页面配置
 # =====================================================================
 st.set_page_config(
-    page_title="IATF 审计转换工具 (基于 v70.1 地址分离安全升级版)",
+    page_title="IATF 审计转换工具 (v70.4 场所动态雷达扫描版)",
     page_icon="🛡️",
     layout="wide"
 )
@@ -28,11 +28,11 @@ with st.sidebar:
         "请根据报告类型选择：",
         (
             "纯净标准模式 (无附属场所)", 
-            "单提取：EMS 扩展场所 (F21-M25)", 
-            "单提取：RL 支持场所 (F27-N32)",
+            "单提取：EMS 扩展场所", 
+            "单提取：RL 支持场所",
             "全量综合模式 (提取 EMS + RL + 被支持场所)"
         ),
-        index=0
+        index=3
     )
     st.divider()
     
@@ -80,7 +80,7 @@ def extract_and_format_english_name(raw_val):
             return eng_only
     return clean_val
 
-# 新增：纯粹用于拆分中文地址省市的函数 (不影响其他代码)
+# 纯粹用于拆分中文地址省市的函数
 def parse_chinese_address(addr_str):
     province, city, street = "", "", addr_str
     if not addr_str: return province, city, street
@@ -101,48 +101,54 @@ def parse_chinese_address(addr_str):
     return province, city, street
 
 # =====================================================================
-# 独立模块 1：EMS 扩展场所提取器 (F21:M25)
+# 独立模块 1：EMS 扩展场所提取器 (解除硬编码，全表扫描)
 # =====================================================================
 def extract_ems_sites(info_df):
     ems_sites = []
     if info_df.empty: return ems_sites
     header_r = -1
     col_map = {}
-    row_start, row_end = 20, min(25, info_df.shape[0])
-    col_start, col_end = 5, min(13, info_df.shape[1])
 
-    for r in range(row_start, row_end):
-        for c in range(col_start, col_end):
+    for r in range(info_df.shape[0]):
+        for c in range(info_df.shape[1]):
             val = str(info_df.iloc[r, c]).strip().upper()
             if "EMS扩展场所信息" in val or "扩展制造场所" in val or "扩展现场" in val:
-                header_r = r
-                for c_scan in range(col_start, col_end):
-                    h_val = str(info_df.iloc[r, c_scan]).strip()
-                    if "中文名称" in h_val: col_map['name_cn'] = c_scan
-                    elif "英文名称" in h_val: col_map['name_en'] = c_scan
-                    elif "中文地址" in h_val: col_map['addr_cn'] = c_scan
-                    elif "英文地址" in h_val: col_map['addr_en'] = c_scan
-                    elif "邮编" in h_val or "邮政编码" in h_val: col_map['zip'] = c_scan
-                    elif "USI" in h_val.upper(): col_map['usi'] = c_scan
-                    elif "人数" in h_val: col_map['emp'] = c_scan
-                break
+                # 找到大标题后，往下扫最多 3 行寻找具体的列名 (兼容跨行合并)
+                for attempt_r in range(r, min(r + 3, info_df.shape[0])):
+                    for c_scan in range(info_df.shape[1]):
+                        h_val = str(info_df.iloc[attempt_r, c_scan]).strip()
+                        if "中文名称" in h_val: col_map['name_cn'] = c_scan
+                        elif "英文名称" in h_val: col_map['name_en'] = c_scan
+                        elif "中文地址" in h_val: col_map['addr_cn'] = c_scan
+                        elif "英文地址" in h_val: col_map['addr_en'] = c_scan
+                        elif "邮编" in h_val or "邮政编码" in h_val: col_map['zip'] = c_scan
+                        elif "USI" in h_val.upper() and col_map.get('usi', -1) == -1: col_map['usi'] = c_scan
+                        elif "人数" in h_val: col_map['emp'] = c_scan
+                    # 只要抓到中文名称和地址，锁定表头行
+                    if 'name_cn' in col_map and 'addr_cn' in col_map:
+                        header_r = attempt_r
+                        break
+                if header_r != -1: break
         if header_r != -1: break
             
     if header_r != -1:
-        for r in range(header_r + 1, row_end):
+        for r in range(header_r + 1, info_df.shape[0]):
             def safe_get_cell(row, col_idx):
                 if col_idx == -1 or col_idx >= info_df.shape[1]: return ""
                 v = str(info_df.iloc[row, col_idx]).strip()
                 return "" if v.lower() == 'nan' else v
 
             name_cn = safe_get_cell(r, col_map.get('name_cn', -1))
-            name_en = safe_get_cell(r, col_map.get('name_en', -1))
             addr_cn = safe_get_cell(r, col_map.get('addr_cn', -1))
+            
+            # 安全退出机制：如果扫到了下一个版块（如支持场所）则停止
+            if name_cn and ("场所" in name_cn and ("支持" in name_cn or "被" in name_cn)): break
             
             if not name_cn and not addr_cn: continue
             if "名称" in name_cn and "地址" in addr_cn: continue
             
             full_site_name = name_cn
+            name_en = safe_get_cell(r, col_map.get('name_en', -1))
             if name_en and name_en not in name_cn:
                 full_site_name = f"{name_cn} {name_en}".strip()
 
@@ -151,7 +157,6 @@ def extract_ems_sites(info_df):
             usi = safe_get_cell(r, col_map.get('usi', -1))
             emp = safe_get_cell(r, col_map.get('emp', -1))
 
-            # 微调：分离 EMS 中文地址
             ems_zh_p, ems_zh_c, ems_zh_s = parse_chinese_address(addr_cn)
 
             ems_street, ems_city, ems_state, ems_country = addr_en, "", "", ""
@@ -172,7 +177,6 @@ def extract_ems_sites(info_df):
                 "IATF_USI": usi,
                 "Usi": usi,
                 "TotalNumberEmployees": emp,
-                # 注入分离后的变量
                 "AddressNative": {"Street1": ems_zh_s, "City": ems_zh_c, "State": ems_zh_p, "Country": "中国", "PostalCode": zip_code},
                 "Address": {"Street1": ems_street, "City": ems_city, "State": ems_state, "Country": ems_country, "PostalCode": zip_code}
             }
@@ -180,49 +184,53 @@ def extract_ems_sites(info_df):
     return ems_sites
 
 # =====================================================================
-# 独立模块 2：RL 支持场所提取器 (F27:N32)
+# 独立模块 2：RL 支持场所提取器 (解除硬编码，全表扫描)
 # =====================================================================
 def extract_rl_sites(info_df):
     support_sites = []
     if info_df.empty: return support_sites
     header_r = -1
     col_map = {}
-    rl_row_start, rl_row_end = 26, min(32, info_df.shape[0])
-    rl_col_start, rl_col_end = 5, min(14, info_df.shape[1])
 
-    for r in range(rl_row_start, rl_row_end):
-        for c in range(rl_col_start, rl_col_end):
+    for r in range(info_df.shape[0]):
+        for c in range(info_df.shape[1]):
             val = str(info_df.iloc[r, c]).strip().upper()
-            if ("支持场所" in val or "RL" in val) and "被" not in val:
-                header_r = r
-                for c_scan in range(rl_col_start, rl_col_end):
-                    h_val = str(info_df.iloc[r, c_scan]).strip()
-                    if "中文名称" in h_val: col_map['name_cn'] = c_scan
-                    elif "英文名称" in h_val: col_map['name_en'] = c_scan
-                    elif "中文地址" in h_val: col_map['addr_cn'] = c_scan
-                    elif "英文地址" in h_val: col_map['addr_en'] = c_scan
-                    elif "邮编" in h_val or "邮政编码" in h_val: col_map['zip'] = c_scan
-                    elif "USI" in h_val.upper(): col_map['usi'] = c_scan
-                    elif "人数" in h_val: col_map['emp'] = c_scan
-                    elif "支持功能" in h_val: col_map['func'] = c_scan
-                break
+            if ("支持场所" in val or "提供支持" in val) and "被" not in val:
+                for attempt_r in range(r, min(r + 3, info_df.shape[0])):
+                    for c_scan in range(info_df.shape[1]):
+                        h_val = str(info_df.iloc[attempt_r, c_scan]).strip()
+                        if "中文名称" in h_val: col_map['name_cn'] = c_scan
+                        elif "英文名称" in h_val: col_map['name_en'] = c_scan
+                        elif "中文地址" in h_val: col_map['addr_cn'] = c_scan
+                        elif "英文地址" in h_val: col_map['addr_en'] = c_scan
+                        elif "邮编" in h_val or "邮政编码" in h_val: col_map['zip'] = c_scan
+                        elif "USI" in h_val.upper() and col_map.get('usi', -1) == -1: col_map['usi'] = c_scan
+                        elif "人数" in h_val: col_map['emp'] = c_scan
+                        elif "支持功能" in h_val: col_map['func'] = c_scan
+                    if 'name_cn' in col_map and 'addr_cn' in col_map:
+                        header_r = attempt_r
+                        break
+                if header_r != -1: break
         if header_r != -1: break
             
     if header_r != -1:
-        for r in range(header_r + 1, rl_row_end):
+        for r in range(header_r + 1, info_df.shape[0]):
             def safe_get_cell(row, col_idx):
                 if col_idx == -1 or col_idx >= info_df.shape[1]: return ""
                 v = str(info_df.iloc[row, col_idx]).strip()
                 return "" if v.lower() == 'nan' else v
 
             name_cn = safe_get_cell(r, col_map.get('name_cn', -1))
-            name_en = safe_get_cell(r, col_map.get('name_en', -1))
             addr_cn = safe_get_cell(r, col_map.get('addr_cn', -1))
+            
+            # 安全退出机制
+            if name_cn and ("场所" in name_cn and ("扩展" in name_cn or "被" in name_cn)): break
             
             if not name_cn and not addr_cn: continue
             if "名称" in name_cn and "地址" in addr_cn: continue
             
             full_site_name = name_cn
+            name_en = safe_get_cell(r, col_map.get('name_en', -1))
             if name_en and name_en not in name_cn:
                 full_site_name = f"{name_cn} {name_en}".strip()
 
@@ -232,7 +240,6 @@ def extract_rl_sites(info_df):
             emp = safe_get_cell(r, col_map.get('emp', -1))
             func = safe_get_cell(r, col_map.get('func', -1))
 
-            # 微调：分离 RL 中文地址
             rl_zh_p, rl_zh_c, rl_zh_s = parse_chinese_address(addr_cn)
 
             rl_street, rl_city, rl_state, rl_country = addr_en, "", "", ""
@@ -254,7 +261,6 @@ def extract_rl_sites(info_df):
                 "IATF_USI": usi,
                 "Usi": usi,
                 "TotalNumberEmployees": emp,
-                # 注入分离后的变量
                 "AddressNative": {"Street1": rl_zh_s, "City": rl_zh_c, "State": rl_zh_p, "Country": "中国", "PostalCode": zip_code},
                 "Address": {"Street1": rl_street, "City": rl_city, "State": rl_state, "Country": rl_country, "PostalCode": zip_code}
             }
@@ -262,50 +268,53 @@ def extract_rl_sites(info_df):
     return support_sites
 
 # =====================================================================
-# 独立模块 3：被支持场所提取器 (F34:N38)
+# 独立模块 3：被支持场所提取器 (解除硬编码，全表扫描)
 # =====================================================================
 def extract_receiving_sites(info_df):
     receiving_sites = []
     if info_df.empty: return receiving_sites
     header_r = -1
     col_map = {}
-    
-    rec_row_start, rec_row_end = 33, min(38, info_df.shape[0])
-    rec_col_start, rec_col_end = 5, min(14, info_df.shape[1])
 
-    for r in range(rec_row_start, rec_row_end):
-        for c in range(rec_col_start, rec_col_end):
+    for r in range(info_df.shape[0]):
+        for c in range(info_df.shape[1]):
             val = str(info_df.iloc[r, c]).strip().upper()
             if "被支持场所" in val:
-                header_r = r
-                for c_scan in range(rec_col_start, rec_col_end):
-                    h_val = str(info_df.iloc[r, c_scan]).strip()
-                    if "中文名称" in h_val: col_map['name_cn'] = c_scan
-                    elif "英文名称" in h_val: col_map['name_en'] = c_scan
-                    elif "中文地址" in h_val: col_map['addr_cn'] = c_scan
-                    elif "英文地址" in h_val: col_map['addr_en'] = c_scan
-                    elif "邮编" in h_val or "邮政编码" in h_val: col_map['zip'] = c_scan
-                    elif "USI" in h_val.upper(): col_map['usi'] = c_scan
-                    elif "人数" in h_val: col_map['emp'] = c_scan
-                    elif "支持功能" in h_val: col_map['func'] = c_scan
-                break
+                for attempt_r in range(r, min(r + 3, info_df.shape[0])):
+                    for c_scan in range(info_df.shape[1]):
+                        h_val = str(info_df.iloc[attempt_r, c_scan]).strip()
+                        if "中文名称" in h_val: col_map['name_cn'] = c_scan
+                        elif "英文名称" in h_val: col_map['name_en'] = c_scan
+                        elif "中文地址" in h_val: col_map['addr_cn'] = c_scan
+                        elif "英文地址" in h_val: col_map['addr_en'] = c_scan
+                        elif "邮编" in h_val or "邮政编码" in h_val: col_map['zip'] = c_scan
+                        elif "USI" in h_val.upper() and col_map.get('usi', -1) == -1: col_map['usi'] = c_scan
+                        elif "人数" in h_val: col_map['emp'] = c_scan
+                        elif "支持功能" in h_val: col_map['func'] = c_scan
+                    if 'name_cn' in col_map and 'addr_cn' in col_map:
+                        header_r = attempt_r
+                        break
+                if header_r != -1: break
         if header_r != -1: break
             
     if header_r != -1:
-        for r in range(header_r + 1, rec_row_end):
+        for r in range(header_r + 1, info_df.shape[0]):
             def safe_get_cell(row, col_idx):
                 if col_idx == -1 or col_idx >= info_df.shape[1]: return ""
                 v = str(info_df.iloc[row, col_idx]).strip()
                 return "" if v.lower() == 'nan' else v
 
             name_cn = safe_get_cell(r, col_map.get('name_cn', -1))
-            name_en = safe_get_cell(r, col_map.get('name_en', -1))
             addr_cn = safe_get_cell(r, col_map.get('addr_cn', -1))
+            
+            # 安全退出机制
+            if name_cn and ("场所" in name_cn and ("支持" in name_cn or "扩展" in name_cn)): break
             
             if not name_cn and not addr_cn: continue
             if "名称" in name_cn and "地址" in addr_cn: continue
             
             full_site_name = name_cn
+            name_en = safe_get_cell(r, col_map.get('name_en', -1))
             if name_en and name_en not in name_cn:
                 full_site_name = f"{name_cn} {name_en}".strip()
 
@@ -315,7 +324,6 @@ def extract_receiving_sites(info_df):
             emp = safe_get_cell(r, col_map.get('emp', -1))
             func = safe_get_cell(r, col_map.get('func', -1))
 
-            # 微调：分离被支持场所中文地址
             rec_zh_p, rec_zh_c, rec_zh_s = parse_chinese_address(addr_cn)
 
             rec_street, rec_city, rec_state, rec_country = addr_en, "", "", ""
@@ -337,7 +345,6 @@ def extract_receiving_sites(info_df):
                 "IATF_USI": usi,
                 "Usi": usi,
                 "TotalNumberEmployees": emp,
-                # 注入分离后的变量
                 "AddressNative": {"Street1": rec_zh_s, "City": rec_zh_c, "State": rec_zh_p, "Country": "中国", "PostalCode": zip_code},
                 "Address": {"Street1": rec_street, "City": rec_city, "State": rec_state, "Country": rec_country, "PostalCode": zip_code}
             }
@@ -420,7 +427,6 @@ def generate_json_logic(excel_file, base_data, mode):
         
     start_iso, end_iso = fmt_iso(start_date_raw), fmt_iso(end_date_raw)
 
-    # 💥💥💥 [保留 70.1 的过程绩效(KPI)精细化提取逻辑，包含防覆写锁] 💥💥💥
     kpi_map = {}
     time_period = ""
     
@@ -538,7 +544,6 @@ def generate_json_logic(excel_file, base_data, mode):
                 "Name": customer_name, "SupplierCode": supplier_code, "NameCSRDocument": csr_name, "DateCSRDocument": csr_date
             })
 
-    # 主地址混合剥离扫描
     english_address = ""
     native_street = ""
     cands = []
@@ -613,8 +618,6 @@ def generate_json_logic(excel_file, base_data, mode):
     ensure_path(final_json, ["AuditData", "AuditDate"])
     if start_iso: final_json["AuditData"]["AuditDate"]["Start"] = start_iso
     if end_iso: final_json["AuditData"]["AuditDate"]["End"] = end_iso
-    
-    # 保留 70.1 稳如磐石的 CB标识号与基础信息提取
     final_json["AuditData"]["CbIdentificationNo"] = find_val_by_key(db_df, ["认证机构标识号"]) or get_db_val(2, 4)
     final_json["AuditData"]["AuditorName"] = raw_name
     final_json["AuditData"]["auditorname"] = raw_name
@@ -633,7 +636,6 @@ def generate_json_logic(excel_file, base_data, mode):
     ensure_path(final_json, ["OrganizationInformation", "Address"])
     org = final_json["OrganizationInformation"]
     
-    # 保留 70.1 的精确提取逻辑
     org["OrganizationName"] = find_val_by_key(db_df, ["组织名称"]) or get_db_val(1, 4)
     org["IndustryCode"] = find_val_by_key(db_df, ["行业代码", "Industry Code"])
     org["IATF_USI"] = find_val_by_key(db_df, ["IATF USI", "USI"]) or get_db_val(3, 4)
@@ -652,7 +654,6 @@ def generate_json_logic(excel_file, base_data, mode):
             if "0" in lang_node and isinstance(lang_node["0"], dict): lang_node["0"]["Products"] = ""
             else: lang_node["Products"] = ""
     
-    # 微调：应用主组织地址的中文分离
     if native_street:
         native_p, native_c, native_s = parse_chinese_address(native_street)
         org["AddressNative"]["Street1"] = native_s
@@ -671,7 +672,6 @@ def generate_json_logic(excel_file, base_data, mode):
         org["AddressNative"]["PostalCode"] = postal_code
         org["Address"]["PostalCode"] = postal_code
 
-    # 根据模式拔插模块
     if "全量综合模式" in mode:
         ems_sites = extract_ems_sites(info_df)
         if ems_sites:
@@ -758,14 +758,12 @@ def generate_json_logic(excel_file, base_data, mode):
                 if p_no in doc_map:
                     clause_docs[i]["DocumentName"] = doc_map[p_no]
 
-    # 💥💥 [绝对保留 70.1 版本的负责人和条款提取逻辑] 💥💥
     processes = []
     total_kpis_mapped = 0
     if not proc_df.empty:
         clause_cols = proc_df.columns[13:] if proc_df.shape[1] > 13 else []
         for idx, row in proc_df.iterrows():
             p_name = str(row.iloc[0]).strip()
-            # 这里的 rep_name 提取被完美恢复
             rep_name = str(row.iloc[2]).strip() if pd.notna(row.iloc[2]) else ""
             if not p_name or p_name.lower() == 'nan': continue
             
@@ -784,7 +782,6 @@ def generate_json_logic(excel_file, base_data, mode):
                     total_kpis_mapped += len(v_list)
                     break
             
-            # 这里的过程条款勾选逻辑也被完美恢复
             for col in clause_cols:
                 if str(row[col]).strip().upper() in ['X', 'TRUE']: proc_obj[col] = True
             processes.append(proc_obj)
@@ -805,7 +802,7 @@ def generate_json_logic(excel_file, base_data, mode):
 # 主界面展示区
 # =====================================================================
 
-st.title("🛡️ 多模板审计转换引擎 (基于 v70.1 地址分离升级版)")
+st.title("🛡️ 多模板审计转换引擎 (v70.4 场所动态雷达扫描版)")
 st.markdown(f"💡 **当前运行模式**: `{run_mode}`")
 
 st.markdown("### 📥 上传数据源")
