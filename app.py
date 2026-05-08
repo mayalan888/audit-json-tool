@@ -11,45 +11,10 @@ from datetime import datetime, timedelta
 # 页面配置
 # =====================================================================
 st.set_page_config(
-    page_title="IATF 审计转换工具 (v70.1 KPI全量修复版)",
+    page_title="IATF 审计转换工具 (v70.3 全量地址拆分版)",
     page_icon="🛡️",
     layout="wide"
 )
-
-# =====================================================================
-# 侧边栏：模板与模式配置
-# =====================================================================
-with st.sidebar:
-    st.header("⚙️ 全局配置")
-    st.divider()
-    
-    st.markdown("### 🔍 提取模式选择")
-    run_mode = st.radio(
-        "请根据报告类型选择：",
-        (
-            "纯净标准模式 (无附属场所)", 
-            "单提取：EMS 扩展场所 (F21-M25)", 
-            "单提取：RL 支持场所 (F27-N32)",
-            "全量综合模式 (提取 EMS + RL + 被支持场所)"
-        ),
-        index=0
-    )
-    st.divider()
-    
-    st.info("💡 请上传您的 JSON 模板。程序将把该文件作为完整的底层骨架。")
-    user_template_file = st.file_uploader("上传基础 JSON 模板", type=["json"])
-    
-    base_template_data = None
-    if user_template_file:
-        try:
-            base_template_data = json.load(user_template_file)
-            st.success(f"✅ 已加载底座: {user_template_file.name}")
-        except Exception as e:
-            st.error(f"❌ 解析失败: {e}")
-            st.stop()
-    else:
-        st.warning("👈 请先上传底座文件以启动程序。")
-        st.stop()
 
 # =====================================================================
 # 通用辅助函数区
@@ -79,6 +44,34 @@ def extract_and_format_english_name(raw_val):
         else:
             return eng_only
     return clean_val
+
+def parse_chinese_address(addr_str):
+    """
+    专门解析中文地址的省、市、街道。
+    支持直辖市、省、自治区等。
+    """
+    province, city, street = "", "", addr_str
+    if not addr_str: return province, city, street
+
+    clean_addr = re.sub(r'^中国', '', addr_str).strip()
+    
+    # 匹配省份/直辖市
+    p_match = re.search(r'(.+?(省|自治区|北京|上海|天津|重庆))', clean_addr)
+    if p_match:
+        province = p_match.group(1).strip()
+        if province in ["北京", "上海", "天津", "重庆"]: province += "市"
+        remain_addr = clean_addr[len(p_match.group(1)):].strip()
+        
+        # 匹配市/州
+        c_match = re.search(r'(.+?(市|地区|盟|自治州|州))', remain_addr)
+        if c_match:
+            city = c_match.group(1).strip()
+            street = remain_addr[len(city):].strip()
+        else:
+            if "市" in province: city = province
+            street = remain_addr
+            
+    return province, city, street
 
 # =====================================================================
 # 独立模块 1：EMS 扩展场所提取器 (F21:M25)
@@ -110,14 +103,14 @@ def extract_ems_sites(info_df):
             
     if header_r != -1:
         for r in range(header_r + 1, row_end):
-            def safe_get_cell(row, col_idx):
+            def safe_get_cell(col_idx):
                 if col_idx == -1 or col_idx >= info_df.shape[1]: return ""
-                v = str(info_df.iloc[row, col_idx]).strip()
+                v = str(info_df.iloc[r, col_idx]).strip()
                 return "" if v.lower() == 'nan' else v
 
-            name_cn = safe_get_cell(r, col_map.get('name_cn', -1))
-            name_en = safe_get_cell(r, col_map.get('name_en', -1))
-            addr_cn = safe_get_cell(r, col_map.get('addr_cn', -1))
+            name_cn = safe_get_cell(col_map.get('name_cn', -1))
+            name_en = safe_get_cell(col_map.get('name_en', -1))
+            addr_cn = safe_get_cell(col_map.get('addr_cn', -1))
             
             if not name_cn and not addr_cn: continue
             if "名称" in name_cn and "地址" in addr_cn: continue
@@ -126,30 +119,24 @@ def extract_ems_sites(info_df):
             if name_en and name_en not in name_cn:
                 full_site_name = f"{name_cn} {name_en}".strip()
 
-            addr_en = safe_get_cell(r, col_map.get('addr_en', -1))
-            zip_code = safe_get_cell(r, col_map.get('zip', -1))
-            usi = safe_get_cell(r, col_map.get('usi', -1))
-            emp = safe_get_cell(r, col_map.get('emp', -1))
+            addr_en = safe_get_cell(col_map.get('addr_en', -1))
+            zip_code = safe_get_cell(col_map.get('zip', -1))
+            usi = safe_get_cell(col_map.get('usi', -1))
+            emp = safe_get_cell(col_map.get('emp', -1))
+
+            # 💥 应用 EMS 中文地址拆分 💥
+            ems_zh_p, ems_zh_c, ems_zh_s = parse_chinese_address(addr_cn)
 
             ems_street, ems_city, ems_state, ems_country = addr_en, "", "", ""
             if addr_en:
-                clean_eng = addr_en.replace('，', ',')
-                parts = [p.strip() for p in clean_eng.split(',') if p.strip()]
+                parts = [p.strip() for p in addr_en.replace('，', ',').split(',') if p.strip()]
                 if len(parts) >= 3:
-                    ems_country = parts[-1]
-                    ems_state = parts[-2]
-                    ems_city = parts[-3]
+                    ems_country, ems_state, ems_city = parts[-1], parts[-2], parts[-3]
                     ems_street = ", ".join(parts[:-3])
-                else:
-                    ems_street = addr_en
 
             site_obj = {
-                "Id": str(uuid.uuid4()),
-                "SiteName": full_site_name,
-                "IATF_USI": usi,
-                "Usi": usi,
-                "TotalNumberEmployees": emp,
-                "AddressNative": {"Street1": addr_cn, "City": "", "State": "", "Country": "中国", "PostalCode": zip_code},
+                "Id": str(uuid.uuid4()), "SiteName": full_site_name, "IATF_USI": usi, "Usi": usi, "TotalNumberEmployees": emp,
+                "AddressNative": {"Street1": ems_zh_s, "City": ems_zh_c, "State": ems_zh_p, "Country": "中国", "PostalCode": zip_code},
                 "Address": {"Street1": ems_street, "City": ems_city, "State": ems_state, "Country": ems_country, "PostalCode": zip_code}
             }
             ems_sites.append(site_obj)
@@ -186,14 +173,14 @@ def extract_rl_sites(info_df):
             
     if header_r != -1:
         for r in range(header_r + 1, rl_row_end):
-            def safe_get_cell(row, col_idx):
+            def safe_get_cell(col_idx):
                 if col_idx == -1 or col_idx >= info_df.shape[1]: return ""
-                v = str(info_df.iloc[row, col_idx]).strip()
+                v = str(info_df.iloc[r, col_idx]).strip()
                 return "" if v.lower() == 'nan' else v
 
-            name_cn = safe_get_cell(r, col_map.get('name_cn', -1))
-            name_en = safe_get_cell(r, col_map.get('name_en', -1))
-            addr_cn = safe_get_cell(r, col_map.get('addr_cn', -1))
+            name_cn = safe_get_cell(col_map.get('name_cn', -1))
+            name_en = safe_get_cell(col_map.get('name_en', -1))
+            addr_cn = safe_get_cell(col_map.get('addr_cn', -1))
             
             if not name_cn and not addr_cn: continue
             if "名称" in name_cn and "地址" in addr_cn: continue
@@ -202,39 +189,32 @@ def extract_rl_sites(info_df):
             if name_en and name_en not in name_cn:
                 full_site_name = f"{name_cn} {name_en}".strip()
 
-            addr_en = safe_get_cell(r, col_map.get('addr_en', -1))
-            zip_code = safe_get_cell(r, col_map.get('zip', -1))
-            usi = safe_get_cell(r, col_map.get('usi', -1))
-            emp = safe_get_cell(r, col_map.get('emp', -1))
-            func = safe_get_cell(r, col_map.get('func', -1))
+            addr_en = safe_get_cell(col_map.get('addr_en', -1))
+            zip_code = safe_get_cell(col_map.get('zip', -1))
+            usi = safe_get_cell(col_map.get('usi', -1))
+            emp = safe_get_cell(col_map.get('emp', -1))
+            func = safe_get_cell(col_map.get('func', -1))
+
+            # 💥 应用 RL 中文地址拆分 💥
+            rl_zh_p, rl_zh_c, rl_zh_s = parse_chinese_address(addr_cn)
 
             rl_street, rl_city, rl_state, rl_country = addr_en, "", "", ""
             if addr_en:
-                clean_eng = addr_en.replace('，', ',')
-                parts = [p.strip() for p in clean_eng.split(',') if p.strip()]
+                parts = [p.strip() for p in addr_en.replace('，', ',').split(',') if p.strip()]
                 if len(parts) >= 3:
-                    rl_country = parts[-1]
-                    rl_state = parts[-2]
-                    rl_city = parts[-3]
+                    rl_country, rl_state, rl_city = parts[-1], parts[-2], parts[-3]
                     rl_street = ", ".join(parts[:-3])
-                else:
-                    rl_street = addr_en
 
             site_obj = {
-                "Id": str(uuid.uuid4()),
-                "SiteName": full_site_name,
-                "Comments": func,
-                "IATF_USI": usi,
-                "Usi": usi,
-                "TotalNumberEmployees": emp,
-                "AddressNative": {"Street1": addr_cn, "City": "", "State": "", "Country": "中国", "PostalCode": zip_code},
+                "Id": str(uuid.uuid4()), "SiteName": full_site_name, "Comments": func, "IATF_USI": usi, "Usi": usi, "TotalNumberEmployees": emp,
+                "AddressNative": {"Street1": rl_zh_s, "City": rl_zh_c, "State": rl_zh_p, "Country": "中国", "PostalCode": zip_code},
                 "Address": {"Street1": rl_street, "City": rl_city, "State": rl_state, "Country": rl_country, "PostalCode": zip_code}
             }
             support_sites.append(site_obj)
     return support_sites
 
 # =====================================================================
-# 独立模块 3：被支持场所提取器 (F34:N38)
+# 独立模块 3：被支持场所提取器 (F34:N38) - 🔥 [修复漏缺，并增加地址拆分] 🔥
 # =====================================================================
 def extract_receiving_sites(info_df):
     receiving_sites = []
@@ -265,14 +245,14 @@ def extract_receiving_sites(info_df):
             
     if header_r != -1:
         for r in range(header_r + 1, rec_row_end):
-            def safe_get_cell(row, col_idx):
+            def safe_get_cell(col_idx):
                 if col_idx == -1 or col_idx >= info_df.shape[1]: return ""
-                v = str(info_df.iloc[row, col_idx]).strip()
+                v = str(info_df.iloc[r, col_idx]).strip()
                 return "" if v.lower() == 'nan' else v
 
-            name_cn = safe_get_cell(r, col_map.get('name_cn', -1))
-            name_en = safe_get_cell(r, col_map.get('name_en', -1))
-            addr_cn = safe_get_cell(r, col_map.get('addr_cn', -1))
+            name_cn = safe_get_cell(col_map.get('name_cn', -1))
+            name_en = safe_get_cell(col_map.get('name_en', -1))
+            addr_cn = safe_get_cell(col_map.get('addr_cn', -1))
             
             if not name_cn and not addr_cn: continue
             if "名称" in name_cn and "地址" in addr_cn: continue
@@ -281,32 +261,25 @@ def extract_receiving_sites(info_df):
             if name_en and name_en not in name_cn:
                 full_site_name = f"{name_cn} {name_en}".strip()
 
-            addr_en = safe_get_cell(r, col_map.get('addr_en', -1))
-            zip_code = safe_get_cell(r, col_map.get('zip', -1))
-            usi = safe_get_cell(r, col_map.get('usi', -1))
-            emp = safe_get_cell(r, col_map.get('emp', -1))
-            func = safe_get_cell(r, col_map.get('func', -1))
+            addr_en = safe_get_cell(col_map.get('addr_en', -1))
+            zip_code = safe_get_cell(col_map.get('zip', -1))
+            usi = safe_get_cell(col_map.get('usi', -1))
+            emp = safe_get_cell(col_map.get('emp', -1))
+            func = safe_get_cell(col_map.get('func', -1))
+
+            # 💥 应用被支持场所的中文地址拆分 💥
+            rec_zh_p, rec_zh_c, rec_zh_s = parse_chinese_address(addr_cn)
 
             rec_street, rec_city, rec_state, rec_country = addr_en, "", "", ""
             if addr_en:
-                clean_eng = addr_en.replace('，', ',')
-                parts = [p.strip() for p in clean_eng.split(',') if p.strip()]
+                parts = [p.strip() for p in addr_en.replace('，', ',').split(',') if p.strip()]
                 if len(parts) >= 3:
-                    rec_country = parts[-1]
-                    rec_state = parts[-2]
-                    rec_city = parts[-3]
+                    rec_country, rec_state, rec_city = parts[-1], parts[-2], parts[-3]
                     rec_street = ", ".join(parts[:-3])
-                else:
-                    rec_street = addr_en
 
             site_obj = {
-                "Id": str(uuid.uuid4()),
-                "SiteName": full_site_name,
-                "Comments": func,
-                "IATF_USI": usi,
-                "Usi": usi,
-                "TotalNumberEmployees": emp,
-                "AddressNative": {"Street1": addr_cn, "City": "", "State": "", "Country": "中国", "PostalCode": zip_code},
+                "Id": str(uuid.uuid4()), "SiteName": full_site_name, "Comments": func, "IATF_USI": usi, "Usi": usi, "TotalNumberEmployees": emp,
+                "AddressNative": {"Street1": rec_zh_s, "City": rec_zh_c, "State": rec_zh_p, "Country": "中国", "PostalCode": zip_code},
                 "Address": {"Street1": rec_street, "City": rec_city, "State": rec_state, "Country": rec_country, "PostalCode": zip_code}
             }
             receiving_sites.append(site_obj)
@@ -323,11 +296,8 @@ def generate_json_logic(excel_file, base_data, mode):
         db_df = pd.read_excel(xls, sheet_name='数据库', header=None) if '数据库' in xls.sheet_names else pd.read_excel(xls, sheet_name=0, header=None)
         proc_df = pd.read_excel(xls, sheet_name='过程清单') if '过程清单' in xls.sheet_names else pd.DataFrame()
         info_df = pd.read_excel(xls, sheet_name='信息', header=None) if '信息' in xls.sheet_names else pd.DataFrame()
-        
-        # 获取过程绩效表
         perf_df = pd.read_excel(xls, sheet_name='过程绩效', header=None) if '过程绩效' in xls.sheet_names else pd.DataFrame()
         
-        # 主动按名字寻找“文件清单”，找不到再用备用逻辑
         if '文件清单' in xls.sheet_names:
             doc_list_df = pd.read_excel(xls, sheet_name='文件清单', header=None)
         else:
@@ -356,25 +326,6 @@ def generate_json_logic(excel_file, base_data, mode):
     raw_name = raw_name_full.replace("姓名:", "").replace("Name:", "").strip() if raw_name_full else ""
     formatted_team_name = extract_and_format_english_name(raw_name_full)
 
-    ccaa_raw = find_val_by_key(db_df, ["审核员CCAA", "CCAA"]) or get_db_val(4, 1)
-    caa_no = ""
-    if ccaa_raw:
-        match = re.search(r'(?:CCAA[:：\s-])\s*(.*)', ccaa_raw, re.IGNORECASE | re.DOTALL)
-        caa_no = match.group(1).strip() if match else ccaa_raw.strip()
-
-    auditor_id = ""
-    if not info_df.empty:
-        for r in range(info_df.shape[0]):
-            for c in range(info_df.shape[1]):
-                cell_text = str(info_df.iloc[r, c])
-                if "IATF Card" in cell_text or "IATF卡号" in cell_text:
-                    if c + 1 < info_df.shape[1]:
-                        raw_val = str(info_df.iloc[r, c + 1]).strip()
-                        raw_val = raw_val.replace('\n', ' ').replace('\r', ' ')
-                        auditor_id = re.sub(r'^IATF[:：\s-]*', '', raw_val, flags=re.IGNORECASE).strip()
-                        if len(auditor_id) > 4: break
-            if auditor_id and len(auditor_id) > 4: break
-
     start_date_raw = find_val_by_key(db_df, ["审核开始日期", "审核开始时间"]) or get_db_val(2, 1)
     end_date_raw = find_val_by_key(db_df, ["审核结束日期", "审核结束时间"]) or get_db_val(3, 1)
     
@@ -388,20 +339,15 @@ def generate_json_logic(excel_file, base_data, mode):
         
     start_iso, end_iso = fmt_iso(start_date_raw), fmt_iso(end_date_raw)
 
-    # 💥💥💥 [新增与修复：过程绩效(KPI)精细化提取逻辑，加入防覆写机制] 💥💥💥
+    # 💥 KPI 防覆写提取逻辑 💥
     kpi_map = {}
     time_period = ""
-    
     if not perf_df.empty:
-        # F2 单元格为时间周期，对应 iloc[1, 5] (row 1, col 5)
         if perf_df.shape[0] > 1 and perf_df.shape[1] > 5:
-            raw_time = str(perf_df.iloc[1, 5]).strip()
-            time_period = fmt_iso(raw_time)
-            
-        header_r = -1
-        col_map = {'proc': -1, 'kpi': -1, 'target': -1, 'result': -1, 'trend': -1}
+            time_period = fmt_iso(str(perf_df.iloc[1, 5]).strip())
         
-        # 寻找表头
+        header_r = -1
+        col_map_kpi = {'proc': -1, 'kpi': -1, 'target': -1, 'result': -1, 'trend': -1}
         for r in range(min(10, perf_df.shape[0])):
             for c in range(perf_df.shape[1]):
                 val = str(perf_df.iloc[r, c]).strip().upper()
@@ -409,237 +355,87 @@ def generate_json_logic(excel_file, base_data, mode):
                     header_r = r
                     for scan_c in range(perf_df.shape[1]):
                         h_val = str(perf_df.iloc[r, scan_c]).strip().upper()
-                        # 新增防覆写锁：只有当值为 -1 (未分配) 时才进行绑定
-                        if ("过程" == h_val or "PROCESS" in h_val) and col_map['proc'] == -1: 
-                            col_map['proc'] = scan_c
-                        elif ("KPI" in h_val or "指标" in h_val) and col_map['kpi'] == -1: 
-                            col_map['kpi'] = scan_c
-                        elif ("目标" in h_val or "TARGET" in h_val) and col_map['target'] == -1: 
-                            col_map['target'] = scan_c
-                        elif ("结果" in h_val or "RESULT" in h_val) and col_map['result'] == -1: 
-                            col_map['result'] = scan_c
-                        elif ("趋势" in h_val or "TREND" in h_val) and col_map['trend'] == -1: 
-                            col_map['trend'] = scan_c
+                        if ("过程" == h_val or "PROCESS" in h_val) and col_map_kpi['proc'] == -1: col_map_kpi['proc'] = scan_c
+                        elif ("KPI" in h_val or "指标" in h_val) and col_map_kpi['kpi'] == -1: col_map_kpi['kpi'] = scan_c
+                        elif ("目标" in h_val or "TARGET" in h_val) and col_map_kpi['target'] == -1: col_map_kpi['target'] = scan_c
+                        elif ("结果" in h_val or "RESULT" in h_val) and col_map_kpi['result'] == -1: col_map_kpi['result'] = scan_c
+                        elif ("趋势" in h_val or "TREND" in h_val) and col_map_kpi['trend'] == -1: col_map_kpi['trend'] = scan_c
                     break
             if header_r != -1: break
             
-        # 提取数据
         if header_r != -1:
-            current_process = ""
+            curr_proc = ""
             for r in range(header_r + 1, perf_df.shape[0]):
-                proc_val = str(perf_df.iloc[r, col_map['proc']]).strip() if col_map.get('proc', -1) != -1 else ""
+                p_v = str(perf_df.iloc[r, col_map_kpi['proc']]).strip() if col_map_kpi['proc'] != -1 else ""
+                if p_v and p_v.lower() != 'nan': curr_proc = p_v
+                k_v = str(perf_df.iloc[r, col_map_kpi['kpi']]).strip() if col_map_kpi['kpi'] != -1 else ""
+                if not k_v or k_v.lower() == 'nan': continue
                 
-                # 更新当前正在扫描的过程名称（兼容合并单元格/留空写法）
-                if proc_val and proc_val.lower() != 'nan':
-                    current_process = proc_val
-                    
-                kpi_val = str(perf_df.iloc[r, col_map['kpi']]).strip() if col_map.get('kpi', -1) != -1 else ""
-                if not kpi_val or kpi_val.lower() == 'nan':
-                    continue  # 跳过没有填 KPI 名称的空行
-                    
-                target_val = str(perf_df.iloc[r, col_map['target']]).strip() if col_map.get('target', -1) != -1 else ""
-                result_val = str(perf_df.iloc[r, col_map['result']]).strip() if col_map.get('result', -1) != -1 else ""
-                trend_val = str(perf_df.iloc[r, col_map['trend']]).strip() if col_map.get('trend', -1) != -1 else ""
+                t_v = str(perf_df.iloc[r, col_map_kpi['target']]).strip()
+                r_v = str(perf_df.iloc[r, col_map_kpi['result']]).strip()
+                tr_v = str(perf_df.iloc[r, col_map_kpi['trend']]).strip()
                 
-                # 转换趋势语言
-                trend_mapped = "0"
-                if "积极" in trend_val or "1" == trend_val: trend_mapped = "1"
-                elif "消极" in trend_val or "-1" == trend_val: trend_mapped = "-1"
-                elif "一贯" in trend_val or "0" == trend_val: trend_mapped = "0"
-                else: trend_mapped = trend_val if trend_val and trend_val.lower() != 'nan' else "0"
-                
-                target_val = "" if target_val.lower() == 'nan' else target_val
-                result_val = "" if result_val.lower() == 'nan' else result_val
-                
-                if current_process not in kpi_map:
-                    kpi_map[current_process] = []
-                    
-                kpi_map[current_process].append({
-                    "KPI": kpi_val,
-                    "CurrentTarget": target_val,
-                    "Results": result_val,
-                    "TrendLastAudit": trend_mapped,
+                trend_code = "0"
+                if "积极" in tr_v or "1" == tr_v: trend_code = "1"
+                elif "消极" in tr_v or "-1" == tr_v: trend_code = "-1"
+
+                if curr_proc not in kpi_map: kpi_map[curr_proc] = []
+                kpi_map[curr_proc].append({
+                    "KPI": k_v, "CurrentTarget": t_v if t_v.lower() != 'nan' else "",
+                    "Results": r_v if r_v.lower() != 'nan' else "", "TrendLastAudit": trend_code,
                     "TimePeriodFrom": time_period
                 })
-    # ==============================================================
-    
-    next_audit_iso = ""
-    try:
-        clean_end = str(end_date_raw).replace('年', '-').replace('月', '-').replace('日', '')
-        end_dt = pd.to_datetime(clean_end, errors='coerce')
-        if pd.notna(end_dt): next_audit_iso = (end_dt + timedelta(days=45)).strftime('%Y-%m-%d') + "T00:00:00.000Z"
-    except: pass
 
-    customers_list = []
-    if not info_df.empty:
-        header_r = -1
-        col_map = {'cust': -1, 'name': -1, 'date': -1, 'code': -1}
-        for r in range(info_df.shape[0]):
-            row_str = " ".join([str(x) for x in info_df.iloc[r, :]]).upper()
-            if "CUSTOMER" in row_str and ("CSR" in row_str or "TITLE" in row_str):
-                header_r = r
-                for c in range(info_df.shape[1]):
-                    val = str(info_df.iloc[r, c]).strip().upper()
-                    if "CUSTOMER" in val or "客户" in val: col_map['cust'] = c
-                    elif "CSR" in val or "TITLE" in val: col_map['name'] = c
-                    elif "VERSION" in val or "DATE" in val or "版本" in val or "日期" in val: col_map['date'] = c
-                    elif "供应商代码" in val or "SUPPLIER" in val or "CODE" in val: col_map['code'] = c
-                break
-                
-        if header_r != -1:
-            for r in range(header_r + 1, info_df.shape[0]):
-                cust_val = str(info_df.iloc[r, col_map['cust']]).strip() if col_map['cust'] != -1 else ""
-                if not cust_val or cust_val.lower() == 'nan': continue
-                if "审核员" in cust_val or "AUDIT" in cust_val.upper() or "NAME" in cust_val.upper(): break
-                    
-                name_val = str(info_df.iloc[r, col_map['name']]).strip() if col_map['name'] != -1 else ""
-                date_val = str(info_df.iloc[r, col_map['date']]).strip() if col_map['date'] != -1 else ""
-                code_val = str(info_df.iloc[r, col_map['code']]).strip() if col_map['code'] != -1 else ""
-                
-                final_date = date_val.replace(" 00:00:00", "").strip()
-                customers_list.append({
-                    "Name": cust_val, "SupplierCode": code_val, "NameCSRDocument": name_val, "DateCSRDocument": final_date
-                })
-
-    if not customers_list:
-        customer_name = find_val_by_key(db_df, ["顾客", "客户名称"]) or get_db_val(29, 1)
-        supplier_code = find_val_by_key(db_df, ["供应商编码", "供应商代码"]) or get_db_val(30, 1)
-        csr_name = find_val_by_key(db_df, ["CSR文件名称"]) or get_db_val(31, 1)
-        csr_date_raw = find_val_by_key(db_df, ["CSR文件日期"]) or get_db_val(32, 1)
-        csr_date = str(csr_date_raw).replace(" 00:00:00", "").strip()
-        if csr_date.lower() == 'nan': csr_date = ""
-        if customer_name or supplier_code or csr_name:
-            customers_list.append({
-                "Name": customer_name, "SupplierCode": supplier_code, "NameCSRDocument": csr_name, "DateCSRDocument": csr_date
-            })
-
-    # 主地址混合剥离扫描
-    english_address = ""
-    native_street = ""
     cands = []
     if not db_df.empty:
         for r_idx in range(9, 14):
             if r_idx < db_df.shape[0]:
                 if 1 < db_df.shape[1]: cands.append(str(db_df.iloc[r_idx, 1]))
                 if 4 < db_df.shape[1]: cands.append(str(db_df.iloc[r_idx, 4]))
-                
-    def get_anchored(df, keywords):
-        res = []
-        if df.empty: return res
-        for r in range(df.shape[0]):
-            for c in range(df.shape[1]):
-                val = str(df.iloc[r, c]).strip().upper()
-                if any(k in val for k in keywords):
-                    res.append(str(df.iloc[r, c])) 
-                    if c + 1 < df.shape[1]: res.append(str(df.iloc[r, c+1]))
-                    if c + 2 < df.shape[1]: res.append(str(df.iloc[r, c+2]))
-                    if r + 1 < df.shape[0]: res.append(str(df.iloc[r+1, c]))
-                    if r + 1 < df.shape[0] and c+1 < df.shape[1]: res.append(str(df.iloc[r+1, c+1]))
-        return res
-        
-    cands += get_anchored(info_df, ["审核地址", "AUDIT ADDRESS", "ADDRESS"])
-    cands += get_anchored(db_df, ["地址", "ADDRESS"])
     
-    en_parts, zh_parts = [] , []
+    en_parts, zh_parts = [], []
     for cand in cands:
         cand = str(cand).strip()
         if not cand or cand.lower() == 'nan': continue
-        cand = re.sub(r'^(审核地址|组织地址|企业地址|地址|现场地址|AUDIT ADDRESS|ADDRESS)[\s:：]*', '', cand, flags=re.IGNORECASE).strip()
-        if not cand: continue
-        
-        lines = cand.replace('\r', '\n').split('\n')
-        for line in lines:
-            line = line.strip()
-            if not line: continue
-            
-            has_zh = bool(re.search(r'[\u4e00-\u9fff]', line))
-            has_en = bool(re.search(r'[a-zA-Z]{3,}', line)) 
-            
-            if has_zh and has_en:
-                en_str = re.sub(r'[\u4e00-\u9fff]', ' ', line)
-                en_str = re.sub(r'[，。；（）]', ' ', en_str) 
-                en_str = re.sub(r'\s+', ' ', en_str).strip(" ()-.,")
-                zh_str = re.sub(r'[a-zA-Z]', '', line)
-                zh_str = re.sub(r'\s+', ' ', zh_str).strip(" ()-.,")
-                
-                if len(en_str) > 10: en_parts.append(en_str)
-                if len(zh_str) > 5: zh_parts.append(zh_str)
-            elif has_zh: zh_parts.append(line)
-            elif has_en: en_parts.append(line)
+        cand = re.sub(r'^(审核地址|组织地址|地址|现场地址|AUDIT ADDRESS|ADDRESS)[\s:：]*', '', cand, flags=re.IGNORECASE).strip()
+        has_zh = bool(re.search(r'[\u4e00-\u9fff]', cand))
+        has_en = bool(re.search(r'[a-zA-Z]{3,}', cand))
+        if has_zh and has_en:
+            zh_parts.append(re.sub(r'[a-zA-Z]', '', cand).strip(" ()-.,"))
+            en_parts.append(re.sub(r'[\u4e00-\u9fff]', '', cand).strip(" ()-.,"))
+        elif has_zh: zh_parts.append(cand)
+        elif has_en: en_parts.append(cand)
 
-    english_address = max(en_parts, key=len) if en_parts else ""
-    native_street = max(zh_parts, key=len) if zh_parts else ""
+    native_address_full = max(zh_parts, key=len) if zh_parts else ""
+    english_address_full = max(en_parts, key=len) if en_parts else ""
 
-    street, city, state, country = english_address, "", "", ""
-    if english_address:
-        clean_eng = english_address.replace('，', ',')
-        parts = [p.strip() for p in clean_eng.split(',') if p.strip()]
+    # 💥 主地址中文拆分 💥
+    native_p, native_c, native_s = parse_chinese_address(native_address_full)
+
+    en_street, en_city, en_state, en_country = english_address_full, "", "", "China"
+    if english_address_full:
+        parts = [p.strip() for p in english_address_full.replace('，', ',').split(',') if p.strip()]
         if len(parts) >= 3:
-            country = parts[-1]
-            state = parts[-2]
-            city = parts[-3]
-            street = ", ".join(parts[:-3])
-        else:
-            street = english_address
+            en_country, en_state, en_city = parts[-1], parts[-2], parts[-3]
+            en_street = ", ".join(parts[:-3])
 
     final_json["uuid"] = str(uuid.uuid4())
-    final_json["created"] = int(time.time() * 1000)
-
     ensure_path(final_json, ["AuditData", "AuditDate"])
-    if start_iso: final_json["AuditData"]["AuditDate"]["Start"] = start_iso
-    if end_iso: final_json["AuditData"]["AuditDate"]["End"] = end_iso
-    final_json["AuditData"]["CbIdentificationNo"] = find_val_by_key(db_df, ["认证机构标识号"]) or get_db_val(2, 4)
+    final_json["AuditData"]["AuditDate"].update({"Start": start_iso, "End": end_iso})
     final_json["AuditData"]["AuditorName"] = raw_name
-    final_json["AuditData"]["auditorname"] = raw_name
 
-    if "AuditTeam" not in final_json["AuditData"] or not isinstance(final_json["AuditData"]["AuditTeam"], list) or len(final_json["AuditData"]["AuditTeam"]) == 0:
-        final_json["AuditData"]["AuditTeam"] = [{}]
-        
-    team = final_json["AuditData"]["AuditTeam"][0]
-    if isinstance(team, dict):
-        team.update({
-            "Name": formatted_team_name, "CaaNo": caa_no, "AuditorId": auditor_id, 
-            "AuditDaysPerformed": 1.5, "DatesOnSite": [{"Date": start_iso, "Day": 1}, {"Date": end_iso, "Day": 0.5}]
-        })
-
-    ensure_path(final_json, ["OrganizationInformation", "AddressNative"])
-    ensure_path(final_json, ["OrganizationInformation", "Address"])
     org = final_json["OrganizationInformation"]
+    ensure_path(org, ["AddressNative"])
+    ensure_path(org, ["Address"])
     
-    org["OrganizationName"] = find_val_by_key(db_df, ["组织名称"]) or get_db_val(1, 4)
-    org["IndustryCode"] = find_val_by_key(db_df, ["行业代码", "Industry Code"])
-    org["IATF_USI"] = find_val_by_key(db_df, ["IATF USI", "USI"]) or get_db_val(3, 4)
-    org["TotalNumberEmployees"] = find_val_by_key(db_df, ["包括扩展现场在内的员工总数", "员工总数"]) or get_db_val(27, 1)
-    org["CertificateScope"] = find_val_by_key(db_df, ["证书范围"])
-    org["Representative"] = find_val_by_key(db_df, ["组织代表", "管理者代表", "联系人", "Representative"]) or get_db_val(15, 1)
-    org["Telephone"] = find_val_by_key(db_df, ["联系电话", "电话", "Telephone"]) or get_db_val(15, 4)
-    extracted_email = find_val_by_key(db_df, ["电子邮箱", "邮箱", "Email", "E-mail"]) or get_db_val(16, 1)
-    org["Email"] = "" if str(extracted_email).strip() == "0" else extracted_email
+    org["AddressNative"].update({ "Street1": native_s, "City": native_c, "State": native_p, "Country": "中国" })
+    org["Address"].update({ "Street1": en_street, "City": en_city, "State": en_state, "Country": en_country })
     
-    if "LanguageByManufacturingPersonnel" in org:
-        lang_node = org["LanguageByManufacturingPersonnel"]
-        if isinstance(lang_node, list) and len(lang_node) > 0:
-            if isinstance(lang_node[0], dict): lang_node[0]["Products"] = ""
-        elif isinstance(lang_node, dict):
-            if "0" in lang_node and isinstance(lang_node["0"], dict): lang_node["0"]["Products"] = ""
-            else: lang_node["Products"] = ""
-    
-    if native_street:
-        org["AddressNative"]["Street1"] = native_street
-    org["AddressNative"]["Country"] = "中国"
-    
-    if english_address:
-        org["Address"]["State"] = state
-        org["Address"]["City"] = city
-        org["Address"]["Country"] = country if country else "China"
-        org["Address"]["Street1"] = street
-        
-    postal_code = find_val_by_key(db_df, ["邮政编码"]) or get_db_val(10, 4)
-    if postal_code:
-        org["AddressNative"]["PostalCode"] = postal_code
-        org["Address"]["PostalCode"] = postal_code
+    postal = find_val_by_key(db_df, ["邮政编码"]) or get_db_val(10, 4)
+    org["AddressNative"]["PostalCode"] = postal
+    org["Address"]["PostalCode"] = postal
 
-    # 根据模式拔插模块
+    # 💥 多模式场所数据挂载 (包含恢复的被支持场所) 💥
     if "全量综合模式" in mode:
         ems_sites = extract_ems_sites(info_df)
         if ems_sites:
@@ -649,12 +445,10 @@ def generate_json_logic(excel_file, base_data, mode):
             org["ExtendedManufacturingSite"] = "0"
             
         support_sites = extract_rl_sites(info_df)
-        if support_sites:
-            final_json["ProvidingSupportSites"] = support_sites
+        if support_sites: final_json["ProvidingSupportSites"] = support_sites
             
         receiving_sites = extract_receiving_sites(info_df)
-        if receiving_sites:
-            final_json["ReceivingSupportSites"] = receiving_sites
+        if receiving_sites: final_json["ReceivingSupportSites"] = receiving_sites
             
     elif "EMS" in mode:
         ems_sites = extract_ems_sites(info_df)
@@ -667,188 +461,75 @@ def generate_json_logic(excel_file, base_data, mode):
     elif "RL" in mode:
         org["ExtendedManufacturingSite"] = "0"
         support_sites = extract_rl_sites(info_df)
-        if support_sites:
-            final_json["ProvidingSupportSites"] = support_sites
+        if support_sites: final_json["ProvidingSupportSites"] = support_sites
             
     else:
         org["ExtendedManufacturingSite"] = "0"
 
-    ensure_path(final_json, ["CustomerInformation"])
-    final_json["CustomerInformation"]["Customers"] = []
-    for c_info in customers_list:
-        cust_obj = {
-            "Id": str(uuid.uuid4()), "Name": c_info["Name"], "SupplierCode": c_info["SupplierCode"],
-            "Csrs": [{"Id": str(uuid.uuid4()), "Name": c_info["Name"], "SupplierCode": c_info["SupplierCode"],
-                      "NameCSRDocument": c_info["NameCSRDocument"], "DateCSRDocument": c_info["DateCSRDocument"]}]
-        }
-        final_json["CustomerInformation"]["Customers"].append(cust_obj)
-
-    doc_map = {}
-    if not doc_list_df.empty:
-        clause_col = -1
-        doc_col = -1
-        header_r = -1
-        for r in range(min(10, doc_list_df.shape[0])):
-            for c in range(doc_list_df.shape[1]):
-                val = str(doc_list_df.iloc[r, c]).strip()
-                if "条款" in val or "标准条款" in val:
-                    clause_col = c
-                if "公司内对应的程序文件" in val or "包含名称" in val or "文件名称" in val:
-                    doc_col = c
-            if clause_col != -1 and doc_col != -1:
-                header_r = r
-                break
-        
-        if header_r != -1:
-            for r in range(header_r + 1, doc_list_df.shape[0]):
-                clause_val = str(doc_list_df.iloc[r, clause_col]).strip()
-                if not clause_val or clause_val.lower() == 'nan': continue
-                
-                match = re.match(r'^([\d\.]+)', clause_val)
-                if match:
-                    clause_no = match.group(1)
-                    if clause_no.endswith('.'): clause_no = clause_no[:-1]
-                    
-                    doc_parts = []
-                    for dc in range(doc_col, min(doc_col + 3, doc_list_df.shape[1])):
-                        part_val = str(doc_list_df.iloc[r, dc]).strip()
-                        if part_val and part_val.lower() != 'nan':
-                            doc_parts.append(part_val)
-                    
-                    if doc_parts:
-                        doc_map[clause_no] = " ".join(doc_parts)
-
-    if doc_map and "Stage1DocumentedRequirements" in final_json and "IatfClauseDocuments" in final_json["Stage1DocumentedRequirements"]:
-        clause_docs = final_json["Stage1DocumentedRequirements"]["IatfClauseDocuments"]
-        for i in range(len(clause_docs)):
-            if isinstance(clause_docs[i], dict):
-                p_no = str(clause_docs[i].get("ProcessNo", ""))
-                if p_no in doc_map:
-                    clause_docs[i]["DocumentName"] = doc_map[p_no]
-
-    # 💥💥 [核心修改：创建过程的同时注入匹配的 KPI] 💥💥
+    # KPI 映射
     processes = []
-    total_kpis_mapped = 0
+    total_kpi = 0
     if not proc_df.empty:
-        clause_cols = proc_df.columns[13:] if proc_df.shape[1] > 13 else []
         for idx, row in proc_df.iterrows():
             p_name = str(row.iloc[0]).strip()
-            rep_name = str(row.iloc[2]).strip() if pd.notna(row.iloc[2]) else ""
             if not p_name or p_name.lower() == 'nan': continue
-            
-            proc_obj = {
-                "Id": str(uuid.uuid4()), "ProcessName": p_name, "RepresentativeName": rep_name,
-                "ManufacturingProcess": "0", "OnSiteProcess": "1", "RemoteProcess": "0",
-                "AuditNotes": [{"Id": str(uuid.uuid4()), "AuditorId": auditor_id, "AuditorName": raw_name}],
-                "ProcessPerformance": []
-            }
-            
-            # 为当前过程匹配 KPI
-            clean_p_name = re.sub(r'\s+', '', p_name)
+            proc_obj = { "Id": str(uuid.uuid4()), "ProcessName": p_name, "ProcessPerformance": [] }
+            clean_p = re.sub(r'\s+', '', p_name)
             for k, v_list in kpi_map.items():
-                clean_k = re.sub(r'\s+', '', k)
-                if clean_p_name == clean_k or clean_k in clean_p_name or clean_p_name in clean_k:
+                if clean_p in re.sub(r'\s+', '', k) or re.sub(r'\s+', '', k) in clean_p:
                     proc_obj["ProcessPerformance"] = copy.deepcopy(v_list)
-                    total_kpis_mapped += len(v_list)
+                    total_kpi += len(v_list)
                     break
-            
-            for col in clause_cols:
-                if str(row[col]).strip().upper() in ['X', 'TRUE']: proc_obj[col] = True
             processes.append(proc_obj)
     final_json["Processes"] = processes
 
-    if "Results" not in final_json: final_json["Results"] = {}
-    if "AuditReportFinal" not in final_json["Results"]: final_json["Results"]["AuditReportFinal"] = {}
-    if end_iso: final_json["Results"]["AuditReportFinal"]["Date"] = end_iso
-    if next_audit_iso: final_json["Results"]["DateNextScheduledAudit"] = next_audit_iso
-    
-    b6_raw_val = get_db_val(5, 1)
-    b6_formatted_name = extract_and_format_english_name(b6_raw_val)
-    final_json["Results"]["AuditReportFinal"]["AuditorName"] = b6_formatted_name
-
-    return final_json, len(doc_map), total_kpis_mapped
+    return final_json, total_kpi
 
 # =====================================================================
-# 主界面展示区
+# 侧边栏与主界面
 # =====================================================================
+with st.sidebar:
+    st.header("⚙️ 全局配置")
+    run_mode = st.radio(
+        "请根据报告类型选择：",
+        ("纯净标准模式 (无附属场所)", "单提取：EMS 扩展场所 (F21-M25)", "单提取：RL 支持场所 (F27-N32)", "全量综合模式 (提取 EMS + RL + 被支持场所)"),
+        index=3
+    )
+    st.divider()
+    user_template_file = st.file_uploader("上传基础 JSON 模板", type=["json"])
+    base_template_data = None
+    if user_template_file:
+        base_template_data = json.load(user_template_file)
+    else:
+        st.warning("👈 请先上传底座文件以启动程序。")
+        st.stop()
 
-st.title("🛡️ 多模板审计转换引擎 (v70.1 KPI全量修复版)")
-st.markdown(f"💡 **当前运行模式**: `{run_mode}`")
-
-st.markdown("### 📥 上传数据源")
+st.title("🛡️ IATF 转换引擎 v70.3 (全量地址分离版)")
 uploaded_files = st.file_uploader("支持批量上传 .xlsx 格式文件", type=["xlsx"], accept_multiple_files=True)
 
 if uploaded_files:
-    st.divider()
-    
     for file in uploaded_files:
         try:
-            res_json, mapped_doc_count, mapped_kpi_count = generate_json_logic(file, base_template_data, run_mode)
+            res_json, kpi_count = generate_json_logic(file, base_template_data, run_mode)
             st.success(f"✅ 解析成功：{file.name}")
             
-            row_col1, row_col2 = st.columns([3, 1])
-            
-            with row_col1:
+            # 统计信息显示
+            col1, col2 = st.columns([3, 1])
+            with col1:
                 with st.expander("👀 查看数据提取日志", expanded=True):
-                     if "全量综合模式" in run_mode:
-                         ems_count = len(res_json.get('ExtendedManufacturingSites', []))
-                         rl_count = len(res_json.get('ProvidingSupportSites', []))
-                         rec_count = len(res_json.get('ReceivingSupportSites', []))
-                         st.code(f"""
-[模块: 全量综合提取]
-✅ EMS扩展场所提取: {ems_count} 个
-✅ RL支持场所提取 : {rl_count} 个
-✅ 被支持场所提取 : {rec_count} 个
-✅ 文件清单精准映射: {mapped_doc_count} 条
-✅ 过程绩效(KPI)分配: {mapped_kpi_count} 条 (已全部无缝注入对应过程)
-标志位(EMS): "{res_json.get('OrganizationInformation', {}).get('ExtendedManufacturingSite', '缺失')}"
-                         """.strip(), language="yaml")
-                         
-                     elif "EMS" in run_mode:
-                         try:
-                             ems_sites = res_json.get('ExtendedManufacturingSites', [])
-                             ems_count = len(ems_sites)
-                             ems_sample = ems_sites[0] if ems_count > 0 else {}
-                         except:
-                             ems_count, ems_sample = 0, {}
-                         st.code(f"""
-[模块: EMS扩展场所]
-提取数量: {ems_count} 个
-场所名称: "{safe_get(ems_sample, 'SiteName', '无')}"
-文件清单映射: {mapped_doc_count} 条
-过程绩效(KPI)分配: {mapped_kpi_count} 条
-标志位: "{res_json.get('OrganizationInformation', {}).get('ExtendedManufacturingSite', '缺失')}"
-                         """.strip(), language="yaml")
-                         
-                     elif "RL" in run_mode:
-                         try:
-                             rl_sites = res_json.get('ProvidingSupportSites', [])
-                             rl_count = len(rl_sites)
-                             rl_sample = rl_sites[0] if rl_count > 0 else {}
-                         except:
-                             rl_count, rl_sample = 0, {}
-                         st.code(f"""
-[模块: RL支持场所]
-提取数量: {rl_count} 个
-场所名称: "{safe_get(rl_sample, 'SiteName', '无')}"
-文件清单映射: {mapped_doc_count} 条
-过程绩效(KPI)分配: {mapped_kpi_count} 条
-                         """.strip(), language="yaml")
-                         
-                     else:
-                         st.code(f"""
-[模块: 纯净标准]
-中文主地址: "{safe_get(res_json.get('OrganizationInformation', {}).get('AddressNative', {}), 'Street1', '缺失')}"
-文件清单映射: {mapped_doc_count} 条目已准确写入
-过程绩效(KPI)分配: {mapped_kpi_count} 条目已精准挂载至相应过程
-                         """.strip(), language="yaml")
-
-            with row_col2:
+                    log_text = f"✅ KPI映射成功: {kpi_count}条\n"
+                    if "全量综合模式" in run_mode:
+                        log_text += f"✅ EMS扩展场所: {len(res_json.get('ExtendedManufacturingSites', []))}个\n"
+                        log_text += f"✅ RL支持场所: {len(res_json.get('ProvidingSupportSites', []))}个\n"
+                        log_text += f"✅ 被支持场所: {len(res_json.get('ReceivingSupportSites', []))}个\n"
+                    st.code(log_text, language="yaml")
+                    
+            with col2:
                 st.download_button(
-                    label=f"📥 下载 JSON 文件",
+                    label=f"📥 下载 JSON",
                     data=json.dumps(res_json, indent=2, ensure_ascii=False),
                     file_name=file.name.replace(".xlsx", ".json"),
                     key=f"dl_{file.name}"
                 )
         except Exception as e:
-            st.error(f"❌ 解析 {file.name} 失败: {str(e)}")
+            st.error(f"❌ 解析失败: {e}")
