@@ -11,7 +11,7 @@ from datetime import datetime, timedelta
 # 页面配置
 # =====================================================================
 st.set_page_config(
-    page_title="IATF 审计转换工具 (v70.6 模板数据保护版)",
+    page_title="IATF 审计转换工具 (v70.6.1 地址分离修复版)",
     page_icon="🛡️",
     layout="wide"
 )
@@ -80,27 +80,44 @@ def extract_and_format_english_name(raw_val):
             return eng_only
     return clean_val
 
+# 💥 唯一修改点：深度优化的地址解析函数 💥
 def parse_chinese_address(addr_str):
     province, city, street = "", "", addr_str
     if not addr_str: return province, city, street
 
-    clean_addr = re.sub(r'^中国', '', addr_str).strip()
-    p_match = re.search(r'(.+?(省|自治区|北京|上海|天津|重庆))', clean_addr)
+    # 预处理：移除开头可能的“中国”
+    clean_addr = re.sub(r'^中国', '', str(addr_str)).strip()
+    
+    # 1. 提取省份/直辖市
+    p_pattern = r'(.+?(省|自治区|北京市|上海市|天津市|重庆市|北京|上海|天津|重庆))'
+    p_match = re.search(p_pattern, clean_addr)
+    
     if p_match:
         province = p_match.group(1).strip()
-        if province in ["北京", "上海", "天津", "重庆"]: province += "市"
-        remain_addr = clean_addr[len(p_match.group(1)):].strip()
-        c_match = re.search(r'(.+?(市|地区|盟|自治州|州))', remain_addr)
-        if c_match:
-            city = c_match.group(1).strip()
-            street = remain_addr[len(city):].strip()
+        if province in ["北京", "上海", "天津", "重庆"]:
+            province += "市"
+        clean_addr = clean_addr[len(p_match.group(1)):].strip()
+    
+    # 2. 提取城市 (独立于省份运行，并移除单独的"州"匹配，防止荆州市被拆断)
+    c_pattern = r'(.+?(市|自治州|地区|盟))'
+    c_match = re.search(c_pattern, clean_addr)
+    
+    if c_match:
+        city = c_match.group(1).strip()
+        street = clean_addr[len(city):].strip()
+    else:
+        # 处理直辖市
+        if province and any(x in province for x in ["北京", "上海", "天津", "重庆"]):
+            city = province
+            street = clean_addr
         else:
-            if "市" in province: city = province
-            street = remain_addr
+            city = ""
+            street = clean_addr
+
     return province, city, street
 
 # =====================================================================
-# 独立模块 1：EMS 扩展场所提取器 (严格恢复 70.1 行列锁定)
+# 独立模块 1：EMS 扩展场所提取器
 # =====================================================================
 def extract_ems_sites(info_df):
     ems_sites = []
@@ -177,7 +194,7 @@ def extract_ems_sites(info_df):
     return ems_sites
 
 # =====================================================================
-# 独立模块 2：RL 支持场所提取器 (严格恢复 70.1 行列锁定)
+# 独立模块 2：RL 支持场所提取器
 # =====================================================================
 def extract_rl_sites(info_df):
     support_sites = []
@@ -257,7 +274,7 @@ def extract_rl_sites(info_df):
     return support_sites
 
 # =====================================================================
-# 独立模块 3：被支持场所提取器 (严格恢复 70.1 行列锁定)
+# 独立模块 3：被支持场所提取器
 # =====================================================================
 def extract_receiving_sites(info_df):
     receiving_sites = []
@@ -527,7 +544,6 @@ def generate_json_logic(excel_file, base_data, mode):
                 "Name": customer_name, "SupplierCode": supplier_code, "NameCSRDocument": csr_name, "DateCSRDocument": csr_date
             })
 
-    # 主地址提取
     english_address = ""
     native_street = ""
     cands = []
@@ -843,7 +859,7 @@ def generate_json_logic(excel_file, base_data, mode):
 # 主界面展示区
 # =====================================================================
 
-st.title("🛡️ 多模板审计转换引擎 (v70.6 模板数据保护版)")
+st.title("🛡️ 多模板审计转换引擎 (v70.6.1 地址分离修复版)")
 st.markdown(f"💡 **当前运行模式**: `{run_mode}`")
 
 st.markdown("### 📥 上传数据源")
