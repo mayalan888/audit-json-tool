@@ -11,7 +11,7 @@ from datetime import datetime, timedelta
 # 页面配置
 # =====================================================================
 st.set_page_config(
-    page_title="IATF 审计转换工具 (v70.6 模板数据保护版)",
+    page_title="IATF 审计转换工具 (v70.7 中英文范围双轨版)",
     page_icon="🛡️",
     layout="wide"
 )
@@ -100,7 +100,7 @@ def parse_chinese_address(addr_str):
     return province, city, street
 
 # =====================================================================
-# 独立模块 1：EMS 扩展场所提取器 (严格恢复 70.1 行列锁定)
+# 独立模块 1：EMS 扩展场所提取器
 # =====================================================================
 def extract_ems_sites(info_df):
     ems_sites = []
@@ -177,7 +177,7 @@ def extract_ems_sites(info_df):
     return ems_sites
 
 # =====================================================================
-# 独立模块 2：RL 支持场所提取器 (严格恢复 70.1 行列锁定)
+# 独立模块 2：RL 支持场所提取器
 # =====================================================================
 def extract_rl_sites(info_df):
     support_sites = []
@@ -257,7 +257,7 @@ def extract_rl_sites(info_df):
     return support_sites
 
 # =====================================================================
-# 独立模块 3：被支持场所提取器 (严格恢复 70.1 行列锁定)
+# 独立模块 3：被支持场所提取器
 # =====================================================================
 def extract_receiving_sites(info_df):
     receiving_sites = []
@@ -349,6 +349,9 @@ def generate_json_logic(excel_file, base_data, mode):
         proc_df = pd.read_excel(xls, sheet_name='过程清单') if '过程清单' in xls.sheet_names else pd.DataFrame()
         info_df = pd.read_excel(xls, sheet_name='信息', header=None) if '信息' in xls.sheet_names else pd.DataFrame()
         perf_df = pd.read_excel(xls, sheet_name='过程绩效', header=None) if '过程绩效' in xls.sheet_names else pd.DataFrame()
+        
+        # 💥 引入范围 Sheet 解析 💥
+        scope_df = pd.read_excel(xls, sheet_name='范围', header=None) if '范围' in xls.sheet_names else pd.DataFrame()
         
         if '文件清单' in xls.sheet_names:
             doc_list_df = pd.read_excel(xls, sheet_name='文件清单', header=None)
@@ -599,7 +602,6 @@ def generate_json_logic(excel_file, base_data, mode):
     final_json["uuid"] = str(uuid.uuid4())
     final_json["created"] = int(time.time() * 1000)
 
-    # 💥💥💥 [数据保护：条件覆盖写入，不再用空字符串擦除底座数据] 💥💥💥
     ensure_path(final_json, ["AuditData", "AuditDate"])
     if start_iso: final_json["AuditData"]["AuditDate"]["Start"] = start_iso
     if end_iso: final_json["AuditData"]["AuditDate"]["End"] = end_iso
@@ -626,7 +628,6 @@ def generate_json_logic(excel_file, base_data, mode):
     ensure_path(final_json, ["OrganizationInformation", "Address"])
     org = final_json["OrganizationInformation"]
     
-    # [数据保护] 只有非空才会写入
     org_name = find_val_by_key(db_df, ["组织名称"]) or get_db_val(1, 4)
     if org_name: org["OrganizationName"] = org_name
     
@@ -639,9 +640,6 @@ def generate_json_logic(excel_file, base_data, mode):
     emp_total = find_val_by_key(db_df, ["包括扩展现场在内的员工总数", "员工总数"]) or get_db_val(27, 1)
     if emp_total: org["TotalNumberEmployees"] = emp_total
     
-    cert_scope = find_val_by_key(db_df, ["证书范围"])
-    if cert_scope: org["CertificateScope"] = cert_scope
-    
     rep = find_val_by_key(db_df, ["组织代表", "管理者代表", "联系人", "Representative"]) or get_db_val(15, 1)
     if rep: org["Representative"] = rep
     
@@ -651,7 +649,41 @@ def generate_json_logic(excel_file, base_data, mode):
     email = find_val_by_key(db_df, ["电子邮箱", "邮箱", "Email", "E-mail"]) or get_db_val(16, 1)
     if email and str(email).strip() != "0": org["Email"] = email
     
-    # 组织主地址条件写入保护
+    # =================================================================
+    # 💥💥 新增：中英文证书范围精准分离提取 💥💥
+    # =================================================================
+    cert_scope_en = ""
+    cert_scope_cn = ""
+    
+    # 优先从“范围” Sheet 中精确抓取
+    if not scope_df.empty:
+        for r in range(scope_df.shape[0]):
+            for c in range(scope_df.shape[1]):
+                val = str(scope_df.iloc[r, c]).strip()
+                if "审核范围" in val and ("英" in val or "En" in val):
+                    if c + 1 < scope_df.shape[1]: cert_scope_en = str(scope_df.iloc[r, c+1]).strip()
+                elif "审核范围" in val and "英" not in val:
+                    if c + 1 < scope_df.shape[1]: cert_scope_cn = str(scope_df.iloc[r, c+1]).strip()
+                    
+    # 如果没找到，退回到数据库使用剥离逻辑进行保护性提取
+    if not cert_scope_en and not cert_scope_cn:
+        raw_scope = find_val_by_key(db_df, ["证书范围"])
+        if raw_scope and raw_scope.lower() != 'nan':
+            has_zh = bool(re.search(r'[\u4e00-\u9fff]', raw_scope))
+            if has_zh:
+                # 剔除英文字符保留中文
+                cert_scope_cn = re.sub(r'[a-zA-Z]', '', raw_scope).strip(' ,.;()，。；（）')
+                # 剔除中文字符保留英文
+                cert_scope_en = re.sub(r'[\u4e00-\u9fff]', '', raw_scope).strip(' ,.;()，。；（）')
+            else:
+                cert_scope_en = raw_scope
+
+    if cert_scope_en and cert_scope_en.lower() != 'nan': 
+        org["CertificateScope"] = cert_scope_en
+    if cert_scope_cn and cert_scope_cn.lower() != 'nan': 
+        org["CertificateScopeNative"] = cert_scope_cn
+    # =================================================================
+    
     if native_street:
         native_p, native_c, native_s = parse_chinese_address(native_street)
         if native_p: org["AddressNative"]["State"] = native_p
@@ -703,7 +735,6 @@ def generate_json_logic(excel_file, base_data, mode):
     else:
         org["ExtendedManufacturingSite"] = "0"
 
-    # [数据保护] 只有获取到客户数据才重写，没有则保留底座原样
     ensure_path(final_json, ["CustomerInformation"])
     if customers_list:
         final_json["CustomerInformation"]["Customers"] = []
@@ -758,13 +789,11 @@ def generate_json_logic(excel_file, base_data, mode):
                 if p_no in doc_map:
                     clause_docs[i]["DocumentName"] = doc_map[p_no]
 
-    # 💥💥💥 [核心数据保护区：过程数据深度融合 (Deep Merge)] 💥💥💥
     total_kpis_mapped = 0
     if not proc_df.empty:
         processes_list = []
         base_processes = final_json.get("Processes", [])
         
-        # 建立底座中现有过程的映射字典，以便继承隐藏参数
         base_proc_map = {}
         for bp in base_processes:
             if isinstance(bp, dict):
@@ -780,17 +809,14 @@ def generate_json_logic(excel_file, base_data, mode):
             
             clean_p_name = re.sub(r'\s+', '', p_name)
             
-            # 1. 尝试从底座模板中寻找该过程，完美继承底座属性
             proc_obj = base_proc_map.get(clean_p_name)
             
-            # 如果名字有细微差异，尝试模糊匹配
             if not proc_obj:
                 for k, v in base_proc_map.items():
                     if clean_p_name in k or k in clean_p_name:
                         proc_obj = v
                         break
             
-            # 2. 如果底座里真的没有这个过程，才创建全新的
             if not proc_obj:
                 proc_obj = {
                     "Id": str(uuid.uuid4()), "ProcessName": p_name,
@@ -798,18 +824,16 @@ def generate_json_logic(excel_file, base_data, mode):
                     "AuditNotes": [], "ProcessPerformance": []
                 }
             else:
-                proc_obj["ProcessName"] = p_name # 名字对齐到Excel
+                proc_obj["ProcessName"] = p_name 
                 
             if rep_name: proc_obj["RepresentativeName"] = rep_name
             
-            # 审核员信息挂载
             if "AuditNotes" not in proc_obj: proc_obj["AuditNotes"] = []
             if len(proc_obj["AuditNotes"]) == 0:
                 proc_obj["AuditNotes"].append({"Id": str(uuid.uuid4())})
             if auditor_id: proc_obj["AuditNotes"][0]["AuditorId"] = auditor_id
             if raw_name: proc_obj["AuditNotes"][0]["AuditorName"] = raw_name
             
-            # 3. 将新的 KPI 注入到继承来的过程对象中
             for k, v_list in kpi_map.items():
                 clean_k = re.sub(r'\s+', '', k)
                 if clean_p_name == clean_k or clean_k in clean_p_name or clean_p_name in clean_k:
@@ -817,17 +841,14 @@ def generate_json_logic(excel_file, base_data, mode):
                     total_kpis_mapped += len(v_list)
                     break
             
-            # 4. 更新条款打 X 状态
             for col in clause_cols:
                 if str(row[col]).strip().upper() in ['X', 'TRUE']: proc_obj[col] = True
                 
             processes_list.append(proc_obj)
             
-        # 保护性写入：仅将Excel里列出的过程写回 JSON，且均包含继承来的底层数据
         if processes_list:
             final_json["Processes"] = processes_list
 
-    # 报告最终信息写入
     if "Results" not in final_json: final_json["Results"] = {}
     if "AuditReportFinal" not in final_json["Results"]: final_json["Results"]["AuditReportFinal"] = {}
     if end_iso: final_json["Results"]["AuditReportFinal"]["Date"] = end_iso
@@ -843,7 +864,7 @@ def generate_json_logic(excel_file, base_data, mode):
 # 主界面展示区
 # =====================================================================
 
-st.title("🛡️ 多模板审计转换引擎 (v70.6 模板数据保护版)")
+st.title("🛡️ 多模板审计转换引擎 (v70.7 中英文范围双轨版)")
 st.markdown(f"💡 **当前运行模式**: `{run_mode}`")
 
 st.markdown("### 📥 上传数据源")
@@ -870,6 +891,7 @@ if uploaded_files:
 ✅ EMS扩展场所提取: {ems_count} 个
 ✅ RL支持场所提取 : {rl_count} 个
 ✅ 被支持场所提取 : {rec_count} 个
+✅ 证书范围精准拆离: {res_json.get('OrganizationInformation', {}).get('CertificateScopeNative', '缺失')}
 ✅ 文件清单精准映射: {mapped_doc_count} 条
 ✅ 过程绩效(KPI)分配: {mapped_kpi_count} 条
 标志位(EMS): "{res_json.get('OrganizationInformation', {}).get('ExtendedManufacturingSite', '缺失')}"
@@ -888,7 +910,6 @@ if uploaded_files:
 场所名称: "{safe_get(ems_sample, 'SiteName', '无')}"
 文件清单映射: {mapped_doc_count} 条
 过程绩效(KPI)分配: {mapped_kpi_count} 条
-标志位: "{res_json.get('OrganizationInformation', {}).get('ExtendedManufacturingSite', '缺失')}"
                          """.strip(), language="yaml")
                          
                      elif "RL" in run_mode:
@@ -910,7 +931,6 @@ if uploaded_files:
                          st.code(f"""
 [模块: 纯净标准]
 中文主地址: "{safe_get(res_json.get('OrganizationInformation', {}).get('AddressNative', {}), 'Street1', '缺失')}"
-文件清单映射: {mapped_doc_count} 条目已准确写入
 过程绩效(KPI)分配: {mapped_kpi_count} 条目已精准挂载至相应过程
                          """.strip(), language="yaml")
 
