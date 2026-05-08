@@ -11,7 +11,7 @@ from datetime import datetime, timedelta
 # 页面配置
 # =====================================================================
 st.set_page_config(
-    page_title="IATF 审计转换工具 (v70.5 纯净回调分离版)",
+    page_title="IATF 审计转换工具 (v70.6 模板数据保护版)",
     page_icon="🛡️",
     layout="wide"
 )
@@ -80,7 +80,6 @@ def extract_and_format_english_name(raw_val):
             return eng_only
     return clean_val
 
-# 新增：纯粹用于拆分中文地址省市的函数
 def parse_chinese_address(addr_str):
     province, city, street = "", "", addr_str
     if not addr_str: return province, city, street
@@ -101,7 +100,7 @@ def parse_chinese_address(addr_str):
     return province, city, street
 
 # =====================================================================
-# 独立模块 1：EMS 扩展场所提取器 (严格恢复 70.1 行列锁定，只加地址分离)
+# 独立模块 1：EMS 扩展场所提取器 (严格恢复 70.1 行列锁定)
 # =====================================================================
 def extract_ems_sites(info_df):
     ems_sites = []
@@ -163,7 +162,6 @@ def extract_ems_sites(info_df):
                 else:
                     ems_street = addr_en
 
-            # 仅添加：拆分中文地址
             ems_zh_p, ems_zh_c, ems_zh_s = parse_chinese_address(addr_cn)
 
             site_obj = {
@@ -179,7 +177,7 @@ def extract_ems_sites(info_df):
     return ems_sites
 
 # =====================================================================
-# 独立模块 2：RL 支持场所提取器 (严格恢复 70.1 行列锁定，只加地址分离)
+# 独立模块 2：RL 支持场所提取器 (严格恢复 70.1 行列锁定)
 # =====================================================================
 def extract_rl_sites(info_df):
     support_sites = []
@@ -243,7 +241,6 @@ def extract_rl_sites(info_df):
                 else:
                     rl_street = addr_en
 
-            # 仅添加：拆分中文地址
             rl_zh_p, rl_zh_c, rl_zh_s = parse_chinese_address(addr_cn)
 
             site_obj = {
@@ -260,7 +257,7 @@ def extract_rl_sites(info_df):
     return support_sites
 
 # =====================================================================
-# 独立模块 3：被支持场所提取器 (严格恢复 70.1 行列锁定，只加地址分离)
+# 独立模块 3：被支持场所提取器 (严格恢复 70.1 行列锁定)
 # =====================================================================
 def extract_receiving_sites(info_df):
     receiving_sites = []
@@ -325,7 +322,6 @@ def extract_receiving_sites(info_df):
                 else:
                     rec_street = addr_en
 
-            # 仅添加：拆分中文地址
             rec_zh_p, rec_zh_c, rec_zh_s = parse_chinese_address(addr_cn)
 
             site_obj = {
@@ -352,11 +348,8 @@ def generate_json_logic(excel_file, base_data, mode):
         db_df = pd.read_excel(xls, sheet_name='数据库', header=None) if '数据库' in xls.sheet_names else pd.read_excel(xls, sheet_name=0, header=None)
         proc_df = pd.read_excel(xls, sheet_name='过程清单') if '过程清单' in xls.sheet_names else pd.DataFrame()
         info_df = pd.read_excel(xls, sheet_name='信息', header=None) if '信息' in xls.sheet_names else pd.DataFrame()
-        
-        # 获取过程绩效表
         perf_df = pd.read_excel(xls, sheet_name='过程绩效', header=None) if '过程绩效' in xls.sheet_names else pd.DataFrame()
         
-        # 主动按名字寻找“文件清单”，找不到再用备用逻辑
         if '文件清单' in xls.sheet_names:
             doc_list_df = pd.read_excel(xls, sheet_name='文件清单', header=None)
         else:
@@ -417,7 +410,6 @@ def generate_json_logic(excel_file, base_data, mode):
         
     start_iso, end_iso = fmt_iso(start_date_raw), fmt_iso(end_date_raw)
 
-    # 💥💥💥 [严格遵守 70.1 的过程绩效提取与防覆写] 💥💥💥
     kpi_map = {}
     time_period = ""
     
@@ -592,80 +584,92 @@ def generate_json_logic(excel_file, base_data, mode):
     english_address = max(en_parts, key=len) if en_parts else ""
     native_street = max(zh_parts, key=len) if zh_parts else ""
 
-    street, city, state, country = english_address, "", "", ""
+    en_street, en_city, en_state, en_country = english_address, "", "", ""
     if english_address:
         clean_eng = english_address.replace('，', ',')
         parts = [p.strip() for p in clean_eng.split(',') if p.strip()]
         if len(parts) >= 3:
-            country = parts[-1]
-            state = parts[-2]
-            city = parts[-3]
-            street = ", ".join(parts[:-3])
+            en_country = parts[-1]
+            en_state = parts[-2]
+            en_city = parts[-3]
+            en_street = ", ".join(parts[:-3])
         else:
-            street = english_address
+            en_street = english_address
 
     final_json["uuid"] = str(uuid.uuid4())
     final_json["created"] = int(time.time() * 1000)
 
+    # 💥💥💥 [数据保护：条件覆盖写入，不再用空字符串擦除底座数据] 💥💥💥
     ensure_path(final_json, ["AuditData", "AuditDate"])
     if start_iso: final_json["AuditData"]["AuditDate"]["Start"] = start_iso
     if end_iso: final_json["AuditData"]["AuditDate"]["End"] = end_iso
-    final_json["AuditData"]["CbIdentificationNo"] = find_val_by_key(db_df, ["认证机构标识号"]) or get_db_val(2, 4)
-    final_json["AuditData"]["AuditorName"] = raw_name
-    final_json["AuditData"]["auditorname"] = raw_name
+    
+    cb_id = find_val_by_key(db_df, ["认证机构标识号"]) or get_db_val(2, 4)
+    if cb_id: final_json["AuditData"]["CbIdentificationNo"] = cb_id
+    
+    if raw_name:
+        final_json["AuditData"]["AuditorName"] = raw_name
+        final_json["AuditData"]["auditorname"] = raw_name
 
     if "AuditTeam" not in final_json["AuditData"] or not isinstance(final_json["AuditData"]["AuditTeam"], list) or len(final_json["AuditData"]["AuditTeam"]) == 0:
         final_json["AuditData"]["AuditTeam"] = [{}]
         
     team = final_json["AuditData"]["AuditTeam"][0]
     if isinstance(team, dict):
-        team.update({
-            "Name": formatted_team_name, "CaaNo": caa_no, "AuditorId": auditor_id, 
-            "AuditDaysPerformed": 1.5, "DatesOnSite": [{"Date": start_iso, "Day": 1}, {"Date": end_iso, "Day": 0.5}]
-        })
+        if formatted_team_name: team["Name"] = formatted_team_name
+        if caa_no: team["CaaNo"] = caa_no
+        if auditor_id: team["AuditorId"] = auditor_id
+        team["AuditDaysPerformed"] = 1.5
+        team["DatesOnSite"] = [{"Date": start_iso, "Day": 1}, {"Date": end_iso, "Day": 0.5}]
 
     ensure_path(final_json, ["OrganizationInformation", "AddressNative"])
     ensure_path(final_json, ["OrganizationInformation", "Address"])
     org = final_json["OrganizationInformation"]
     
-    org["OrganizationName"] = find_val_by_key(db_df, ["组织名称"]) or get_db_val(1, 4)
-    org["IndustryCode"] = find_val_by_key(db_df, ["行业代码", "Industry Code"])
-    org["IATF_USI"] = find_val_by_key(db_df, ["IATF USI", "USI"]) or get_db_val(3, 4)
-    org["TotalNumberEmployees"] = find_val_by_key(db_df, ["包括扩展现场在内的员工总数", "员工总数"]) or get_db_val(27, 1)
-    org["CertificateScope"] = find_val_by_key(db_df, ["证书范围"])
-    org["Representative"] = find_val_by_key(db_df, ["组织代表", "管理者代表", "联系人", "Representative"]) or get_db_val(15, 1)
-    org["Telephone"] = find_val_by_key(db_df, ["联系电话", "电话", "Telephone"]) or get_db_val(15, 4)
-    extracted_email = find_val_by_key(db_df, ["电子邮箱", "邮箱", "Email", "E-mail"]) or get_db_val(16, 1)
-    org["Email"] = "" if str(extracted_email).strip() == "0" else extracted_email
+    # [数据保护] 只有非空才会写入
+    org_name = find_val_by_key(db_df, ["组织名称"]) or get_db_val(1, 4)
+    if org_name: org["OrganizationName"] = org_name
     
-    if "LanguageByManufacturingPersonnel" in org:
-        lang_node = org["LanguageByManufacturingPersonnel"]
-        if isinstance(lang_node, list) and len(lang_node) > 0:
-            if isinstance(lang_node[0], dict): lang_node[0]["Products"] = ""
-        elif isinstance(lang_node, dict):
-            if "0" in lang_node and isinstance(lang_node["0"], dict): lang_node["0"]["Products"] = ""
-            else: lang_node["Products"] = ""
+    ind_code = find_val_by_key(db_df, ["行业代码", "Industry Code"])
+    if ind_code: org["IndustryCode"] = ind_code
     
-    # 仅修改：组织主地址中文分离
+    usi = find_val_by_key(db_df, ["IATF USI", "USI"]) or get_db_val(3, 4)
+    if usi: org["IATF_USI"] = usi
+    
+    emp_total = find_val_by_key(db_df, ["包括扩展现场在内的员工总数", "员工总数"]) or get_db_val(27, 1)
+    if emp_total: org["TotalNumberEmployees"] = emp_total
+    
+    cert_scope = find_val_by_key(db_df, ["证书范围"])
+    if cert_scope: org["CertificateScope"] = cert_scope
+    
+    rep = find_val_by_key(db_df, ["组织代表", "管理者代表", "联系人", "Representative"]) or get_db_val(15, 1)
+    if rep: org["Representative"] = rep
+    
+    tel = find_val_by_key(db_df, ["联系电话", "电话", "Telephone"]) or get_db_val(15, 4)
+    if tel: org["Telephone"] = tel
+    
+    email = find_val_by_key(db_df, ["电子邮箱", "邮箱", "Email", "E-mail"]) or get_db_val(16, 1)
+    if email and str(email).strip() != "0": org["Email"] = email
+    
+    # 组织主地址条件写入保护
     if native_street:
         native_p, native_c, native_s = parse_chinese_address(native_street)
-        org["AddressNative"]["Street1"] = native_s
-        org["AddressNative"]["City"] = native_c
-        org["AddressNative"]["State"] = native_p
+        if native_p: org["AddressNative"]["State"] = native_p
+        if native_c: org["AddressNative"]["City"] = native_c
+        if native_s: org["AddressNative"]["Street1"] = native_s
     org["AddressNative"]["Country"] = "中国"
     
     if english_address:
-        org["Address"]["State"] = state
-        org["Address"]["City"] = city
-        org["Address"]["Country"] = country if country else "China"
-        org["Address"]["Street1"] = street
+        if en_state: org["Address"]["State"] = en_state
+        if en_city: org["Address"]["City"] = en_city
+        if en_country: org["Address"]["Country"] = en_country
+        if en_street: org["Address"]["Street1"] = en_street
         
     postal_code = find_val_by_key(db_df, ["邮政编码"]) or get_db_val(10, 4)
     if postal_code:
         org["AddressNative"]["PostalCode"] = postal_code
         org["Address"]["PostalCode"] = postal_code
 
-    # 严格按照模式提取（彻底避免跨界污染）
     if "全量综合模式" in mode:
         ems_sites = extract_ems_sites(info_df)
         if ems_sites:
@@ -699,15 +703,17 @@ def generate_json_logic(excel_file, base_data, mode):
     else:
         org["ExtendedManufacturingSite"] = "0"
 
+    # [数据保护] 只有获取到客户数据才重写，没有则保留底座原样
     ensure_path(final_json, ["CustomerInformation"])
-    final_json["CustomerInformation"]["Customers"] = []
-    for c_info in customers_list:
-        cust_obj = {
-            "Id": str(uuid.uuid4()), "Name": c_info["Name"], "SupplierCode": c_info["SupplierCode"],
-            "Csrs": [{"Id": str(uuid.uuid4()), "Name": c_info["Name"], "SupplierCode": c_info["SupplierCode"],
-                      "NameCSRDocument": c_info["NameCSRDocument"], "DateCSRDocument": c_info["DateCSRDocument"]}]
-        }
-        final_json["CustomerInformation"]["Customers"].append(cust_obj)
+    if customers_list:
+        final_json["CustomerInformation"]["Customers"] = []
+        for c_info in customers_list:
+            cust_obj = {
+                "Id": str(uuid.uuid4()), "Name": c_info["Name"], "SupplierCode": c_info["SupplierCode"],
+                "Csrs": [{"Id": str(uuid.uuid4()), "Name": c_info["Name"], "SupplierCode": c_info["SupplierCode"],
+                          "NameCSRDocument": c_info["NameCSRDocument"], "DateCSRDocument": c_info["DateCSRDocument"]}]
+            }
+            final_json["CustomerInformation"]["Customers"].append(cust_obj)
 
     doc_map = {}
     if not doc_list_df.empty:
@@ -752,23 +758,58 @@ def generate_json_logic(excel_file, base_data, mode):
                 if p_no in doc_map:
                     clause_docs[i]["DocumentName"] = doc_map[p_no]
 
-    processes = []
+    # 💥💥💥 [核心数据保护区：过程数据深度融合 (Deep Merge)] 💥💥💥
     total_kpis_mapped = 0
     if not proc_df.empty:
+        processes_list = []
+        base_processes = final_json.get("Processes", [])
+        
+        # 建立底座中现有过程的映射字典，以便继承隐藏参数
+        base_proc_map = {}
+        for bp in base_processes:
+            if isinstance(bp, dict):
+                name = bp.get("ProcessName", "")
+                if name:
+                    base_proc_map[re.sub(r'\s+', '', name)] = bp
+                    
         clause_cols = proc_df.columns[13:] if proc_df.shape[1] > 13 else []
         for idx, row in proc_df.iterrows():
             p_name = str(row.iloc[0]).strip()
             rep_name = str(row.iloc[2]).strip() if pd.notna(row.iloc[2]) else ""
             if not p_name or p_name.lower() == 'nan': continue
             
-            proc_obj = {
-                "Id": str(uuid.uuid4()), "ProcessName": p_name, "RepresentativeName": rep_name,
-                "ManufacturingProcess": "0", "OnSiteProcess": "1", "RemoteProcess": "0",
-                "AuditNotes": [{"Id": str(uuid.uuid4()), "AuditorId": auditor_id, "AuditorName": raw_name}],
-                "ProcessPerformance": []
-            }
-            
             clean_p_name = re.sub(r'\s+', '', p_name)
+            
+            # 1. 尝试从底座模板中寻找该过程，完美继承底座属性
+            proc_obj = base_proc_map.get(clean_p_name)
+            
+            # 如果名字有细微差异，尝试模糊匹配
+            if not proc_obj:
+                for k, v in base_proc_map.items():
+                    if clean_p_name in k or k in clean_p_name:
+                        proc_obj = v
+                        break
+            
+            # 2. 如果底座里真的没有这个过程，才创建全新的
+            if not proc_obj:
+                proc_obj = {
+                    "Id": str(uuid.uuid4()), "ProcessName": p_name,
+                    "ManufacturingProcess": "0", "OnSiteProcess": "1", "RemoteProcess": "0",
+                    "AuditNotes": [], "ProcessPerformance": []
+                }
+            else:
+                proc_obj["ProcessName"] = p_name # 名字对齐到Excel
+                
+            if rep_name: proc_obj["RepresentativeName"] = rep_name
+            
+            # 审核员信息挂载
+            if "AuditNotes" not in proc_obj: proc_obj["AuditNotes"] = []
+            if len(proc_obj["AuditNotes"]) == 0:
+                proc_obj["AuditNotes"].append({"Id": str(uuid.uuid4())})
+            if auditor_id: proc_obj["AuditNotes"][0]["AuditorId"] = auditor_id
+            if raw_name: proc_obj["AuditNotes"][0]["AuditorName"] = raw_name
+            
+            # 3. 将新的 KPI 注入到继承来的过程对象中
             for k, v_list in kpi_map.items():
                 clean_k = re.sub(r'\s+', '', k)
                 if clean_p_name == clean_k or clean_k in clean_p_name or clean_p_name in clean_k:
@@ -776,11 +817,17 @@ def generate_json_logic(excel_file, base_data, mode):
                     total_kpis_mapped += len(v_list)
                     break
             
+            # 4. 更新条款打 X 状态
             for col in clause_cols:
                 if str(row[col]).strip().upper() in ['X', 'TRUE']: proc_obj[col] = True
-            processes.append(proc_obj)
-    final_json["Processes"] = processes
+                
+            processes_list.append(proc_obj)
+            
+        # 保护性写入：仅将Excel里列出的过程写回 JSON，且均包含继承来的底层数据
+        if processes_list:
+            final_json["Processes"] = processes_list
 
+    # 报告最终信息写入
     if "Results" not in final_json: final_json["Results"] = {}
     if "AuditReportFinal" not in final_json["Results"]: final_json["Results"]["AuditReportFinal"] = {}
     if end_iso: final_json["Results"]["AuditReportFinal"]["Date"] = end_iso
@@ -788,7 +835,7 @@ def generate_json_logic(excel_file, base_data, mode):
     
     b6_raw_val = get_db_val(5, 1)
     b6_formatted_name = extract_and_format_english_name(b6_raw_val)
-    final_json["Results"]["AuditReportFinal"]["AuditorName"] = b6_formatted_name
+    if b6_formatted_name: final_json["Results"]["AuditReportFinal"]["AuditorName"] = b6_formatted_name
 
     return final_json, len(doc_map), total_kpis_mapped
 
@@ -796,7 +843,7 @@ def generate_json_logic(excel_file, base_data, mode):
 # 主界面展示区
 # =====================================================================
 
-st.title("🛡️ 多模板审计转换引擎 (v70.5 纯净回调分离版)")
+st.title("🛡️ 多模板审计转换引擎 (v70.6 模板数据保护版)")
 st.markdown(f"💡 **当前运行模式**: `{run_mode}`")
 
 st.markdown("### 📥 上传数据源")
