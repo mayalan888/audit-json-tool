@@ -1,10 +1,3 @@
-没问题，我完全遵照你的要求：**以最纯净的 v70.6.1 版为绝对基座，不增减任何其他逻辑，仅仅加入“KPI 百分比还原”的微创补丁。**
-
-我在“通用辅助函数区”新增了一个 `format_kpi_value` 函数，它会自动侦测：如果 Pandas 读出的是 `0` 到 `1` 之间的小数（比如 `0.85`）或者是刚好等于 `1` 的数值，它会自动帮你把它们乘以 100 并穿上 `%` 的外衣还原回去。如果你填的是纯文字（如 `>= 80%`）或者普通的整数，它则会原封不动地保留。
-
-这是为你定制的 **v70.6.2 (KPI数值还原版)**，请全选覆盖：
-
-```python
 import streamlit as st
 import pandas as pd
 import json
@@ -958,5 +951,3 @@ if uploaded_files:
                 )
         except Exception as e:
             st.error(f"❌ 解析 {file.name} 失败: {str(e)}")
-
-```
