@@ -1,3 +1,10 @@
+没问题，我完全遵照你的要求：**以最纯净的 v70.6.1 版为绝对基座，不增减任何其他逻辑，仅仅加入“KPI 百分比还原”的微创补丁。**
+
+我在“通用辅助函数区”新增了一个 `format_kpi_value` 函数，它会自动侦测：如果 Pandas 读出的是 `0` 到 `1` 之间的小数（比如 `0.85`）或者是刚好等于 `1` 的数值，它会自动帮你把它们乘以 100 并穿上 `%` 的外衣还原回去。如果你填的是纯文字（如 `>= 80%`）或者普通的整数，它则会原封不动地保留。
+
+这是为你定制的 **v70.6.2 (KPI数值还原版)**，请全选覆盖：
+
+```python
 import streamlit as st
 import pandas as pd
 import json
@@ -11,7 +18,7 @@ from datetime import datetime, timedelta
 # 页面配置
 # =====================================================================
 st.set_page_config(
-    page_title="IATF 审计转换工具 (v70.6.1 地址分离修复版)",
+    page_title="IATF 审计转换工具 (v70.6.2 KPI数值还原版)",
     page_icon="🛡️",
     layout="wide"
 )
@@ -80,7 +87,6 @@ def extract_and_format_english_name(raw_val):
             return eng_only
     return clean_val
 
-# 💥 唯一修改点：深度优化的地址解析函数 💥
 def parse_chinese_address(addr_str):
     province, city, street = "", "", addr_str
     if not addr_str: return province, city, street
@@ -115,6 +121,32 @@ def parse_chinese_address(addr_str):
             street = clean_addr
 
     return province, city, street
+
+# 💥 新增：KPI 百分比数值智能还原函数 💥
+def format_kpi_value(raw_val):
+    val_str = str(raw_val).strip()
+    if not val_str or val_str.lower() == 'nan':
+        return ""
+    try:
+        f_val = float(val_str)
+        # 如果是 0 到 1 之间（包含1），视作被 Pandas 转换的百分比
+        if 0 < f_val <= 1:
+            pct = round(f_val * 100, 2)
+            # 如果是整数形式 (如 100.0 -> 100%)
+            if pct == int(pct):
+                return f"{int(pct)}%"
+            else:
+                return f"{pct}%"
+        elif f_val == 0:
+            return "0"
+        else:
+            # 还原普通整数 (如 10.0 -> 10)
+            if f_val.is_integer():
+                return str(int(f_val))
+            return val_str
+    except ValueError:
+        # 如果是 ">= 80%" 等无法转为 float 的纯字符串，原样返回
+        return val_str
 
 # =====================================================================
 # 独立模块 1：EMS 扩展场所提取器
@@ -469,9 +501,9 @@ def generate_json_logic(excel_file, base_data, mode):
                 kpi_val = str(perf_df.iloc[r, col_map['kpi']]).strip() if col_map.get('kpi', -1) != -1 else ""
                 if not kpi_val or kpi_val.lower() == 'nan':
                     continue  
-                    
-                target_val = str(perf_df.iloc[r, col_map['target']]).strip() if col_map.get('target', -1) != -1 else ""
-                result_val = str(perf_df.iloc[r, col_map['result']]).strip() if col_map.get('result', -1) != -1 else ""
+                
+                raw_target = str(perf_df.iloc[r, col_map['target']]).strip() if col_map.get('target', -1) != -1 else ""
+                raw_result = str(perf_df.iloc[r, col_map['result']]).strip() if col_map.get('result', -1) != -1 else ""
                 trend_val = str(perf_df.iloc[r, col_map['trend']]).strip() if col_map.get('trend', -1) != -1 else ""
                 
                 trend_mapped = "0"
@@ -480,8 +512,9 @@ def generate_json_logic(excel_file, base_data, mode):
                 elif "一贯" in trend_val or "0" == trend_val: trend_mapped = "0"
                 else: trend_mapped = trend_val if trend_val and trend_val.lower() != 'nan' else "0"
                 
-                target_val = "" if target_val.lower() == 'nan' else target_val
-                result_val = "" if result_val.lower() == 'nan' else result_val
+                # 💥 拦截：应用 KPI 百分比格式智能还原 💥
+                target_val = format_kpi_value(raw_target)
+                result_val = format_kpi_value(raw_result)
                 
                 if current_process not in kpi_map:
                     kpi_map[current_process] = []
@@ -615,7 +648,6 @@ def generate_json_logic(excel_file, base_data, mode):
     final_json["uuid"] = str(uuid.uuid4())
     final_json["created"] = int(time.time() * 1000)
 
-    # 💥💥💥 [数据保护：条件覆盖写入，不再用空字符串擦除底座数据] 💥💥💥
     ensure_path(final_json, ["AuditData", "AuditDate"])
     if start_iso: final_json["AuditData"]["AuditDate"]["Start"] = start_iso
     if end_iso: final_json["AuditData"]["AuditDate"]["End"] = end_iso
@@ -642,7 +674,6 @@ def generate_json_logic(excel_file, base_data, mode):
     ensure_path(final_json, ["OrganizationInformation", "Address"])
     org = final_json["OrganizationInformation"]
     
-    # [数据保护] 只有非空才会写入
     org_name = find_val_by_key(db_df, ["组织名称"]) or get_db_val(1, 4)
     if org_name: org["OrganizationName"] = org_name
     
@@ -667,7 +698,6 @@ def generate_json_logic(excel_file, base_data, mode):
     email = find_val_by_key(db_df, ["电子邮箱", "邮箱", "Email", "E-mail"]) or get_db_val(16, 1)
     if email and str(email).strip() != "0": org["Email"] = email
     
-    # 组织主地址条件写入保护
     if native_street:
         native_p, native_c, native_s = parse_chinese_address(native_street)
         if native_p: org["AddressNative"]["State"] = native_p
@@ -719,7 +749,6 @@ def generate_json_logic(excel_file, base_data, mode):
     else:
         org["ExtendedManufacturingSite"] = "0"
 
-    # [数据保护] 只有获取到客户数据才重写，没有则保留底座原样
     ensure_path(final_json, ["CustomerInformation"])
     if customers_list:
         final_json["CustomerInformation"]["Customers"] = []
@@ -774,13 +803,11 @@ def generate_json_logic(excel_file, base_data, mode):
                 if p_no in doc_map:
                     clause_docs[i]["DocumentName"] = doc_map[p_no]
 
-    # 💥💥💥 [核心数据保护区：过程数据深度融合 (Deep Merge)] 💥💥💥
     total_kpis_mapped = 0
     if not proc_df.empty:
         processes_list = []
         base_processes = final_json.get("Processes", [])
         
-        # 建立底座中现有过程的映射字典，以便继承隐藏参数
         base_proc_map = {}
         for bp in base_processes:
             if isinstance(bp, dict):
@@ -796,17 +823,14 @@ def generate_json_logic(excel_file, base_data, mode):
             
             clean_p_name = re.sub(r'\s+', '', p_name)
             
-            # 1. 尝试从底座模板中寻找该过程，完美继承底座属性
             proc_obj = base_proc_map.get(clean_p_name)
             
-            # 如果名字有细微差异，尝试模糊匹配
             if not proc_obj:
                 for k, v in base_proc_map.items():
                     if clean_p_name in k or k in clean_p_name:
                         proc_obj = v
                         break
             
-            # 2. 如果底座里真的没有这个过程，才创建全新的
             if not proc_obj:
                 proc_obj = {
                     "Id": str(uuid.uuid4()), "ProcessName": p_name,
@@ -814,18 +838,16 @@ def generate_json_logic(excel_file, base_data, mode):
                     "AuditNotes": [], "ProcessPerformance": []
                 }
             else:
-                proc_obj["ProcessName"] = p_name # 名字对齐到Excel
+                proc_obj["ProcessName"] = p_name 
                 
             if rep_name: proc_obj["RepresentativeName"] = rep_name
             
-            # 审核员信息挂载
             if "AuditNotes" not in proc_obj: proc_obj["AuditNotes"] = []
             if len(proc_obj["AuditNotes"]) == 0:
                 proc_obj["AuditNotes"].append({"Id": str(uuid.uuid4())})
             if auditor_id: proc_obj["AuditNotes"][0]["AuditorId"] = auditor_id
             if raw_name: proc_obj["AuditNotes"][0]["AuditorName"] = raw_name
             
-            # 3. 将新的 KPI 注入到继承来的过程对象中
             for k, v_list in kpi_map.items():
                 clean_k = re.sub(r'\s+', '', k)
                 if clean_p_name == clean_k or clean_k in clean_p_name or clean_p_name in clean_k:
@@ -833,17 +855,14 @@ def generate_json_logic(excel_file, base_data, mode):
                     total_kpis_mapped += len(v_list)
                     break
             
-            # 4. 更新条款打 X 状态
             for col in clause_cols:
                 if str(row[col]).strip().upper() in ['X', 'TRUE']: proc_obj[col] = True
                 
             processes_list.append(proc_obj)
             
-        # 保护性写入：仅将Excel里列出的过程写回 JSON，且均包含继承来的底层数据
         if processes_list:
             final_json["Processes"] = processes_list
 
-    # 报告最终信息写入
     if "Results" not in final_json: final_json["Results"] = {}
     if "AuditReportFinal" not in final_json["Results"]: final_json["Results"]["AuditReportFinal"] = {}
     if end_iso: final_json["Results"]["AuditReportFinal"]["Date"] = end_iso
@@ -859,7 +878,7 @@ def generate_json_logic(excel_file, base_data, mode):
 # 主界面展示区
 # =====================================================================
 
-st.title("🛡️ 多模板审计转换引擎 (v70.6.1 地址分离修复版)")
+st.title("🛡️ 多模板审计转换引擎 (v70.6.2 KPI数值还原版)")
 st.markdown(f"💡 **当前运行模式**: `{run_mode}`")
 
 st.markdown("### 📥 上传数据源")
@@ -939,3 +958,5 @@ if uploaded_files:
                 )
         except Exception as e:
             st.error(f"❌ 解析 {file.name} 失败: {str(e)}")
+
+```
