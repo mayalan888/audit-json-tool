@@ -11,7 +11,7 @@ from datetime import datetime, timedelta
 # 页面配置
 # =====================================================================
 st.set_page_config(
-    page_title="IATF 审计转换工具 (v70.6.2 KPI数值还原版)",
+    page_title="IATF 审计转换工具 (v70.6.3 泛用符号勾选版)",
     page_icon="🛡️",
     layout="wide"
 )
@@ -115,7 +115,6 @@ def parse_chinese_address(addr_str):
 
     return province, city, street
 
-# 💥 新增：KPI 百分比数值智能还原函数 💥
 def format_kpi_value(raw_val):
     val_str = str(raw_val).strip()
     if not val_str or val_str.lower() == 'nan':
@@ -505,7 +504,6 @@ def generate_json_logic(excel_file, base_data, mode):
                 elif "一贯" in trend_val or "0" == trend_val: trend_mapped = "0"
                 else: trend_mapped = trend_val if trend_val and trend_val.lower() != 'nan' else "0"
                 
-                # 💥 拦截：应用 KPI 百分比格式智能还原 💥
                 target_val = format_kpi_value(raw_target)
                 result_val = format_kpi_value(raw_result)
                 
@@ -848,8 +846,11 @@ def generate_json_logic(excel_file, base_data, mode):
                     total_kpis_mapped += len(v_list)
                     break
             
+            # 💥 核心替换点：更新条款状态 (泛用符号兼容：只要填了有效内容就视为勾选) 💥
             for col in clause_cols:
-                if str(row[col]).strip().upper() in ['X', 'TRUE']: proc_obj[col] = True
+                cell_val = str(row[col]).strip().lower()
+                if cell_val and cell_val not in ['nan', 'false', '0', 'none']: 
+                    proc_obj[col] = True
                 
             processes_list.append(proc_obj)
             
@@ -871,7 +872,7 @@ def generate_json_logic(excel_file, base_data, mode):
 # 主界面展示区
 # =====================================================================
 
-st.title("🛡️ 多模板审计转换引擎 (v70.6.2 KPI数值还原版)")
+st.title("🛡️ 多模板审计转换引擎 (v70.6.3 泛用符号勾选版)")
 st.markdown(f"💡 **当前运行模式**: `{run_mode}`")
 
 st.markdown("### 📥 上传数据源")
