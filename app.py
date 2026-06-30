@@ -876,7 +876,7 @@ st.title("🛡️ 多模板审计转换引擎 (v70.6.3 泛用符号勾选版)")
 st.markdown(f"💡 **当前运行模式**: `{run_mode}`")
 
 st.markdown("### 📥 上传数据源")
-uploaded_files = st.file_uploader("支持批量上传 .xlsx 格式文件", type=["xlsx"], accept_multiple_files=True)
+uploaded_files = st.file_uploader("支持批量上传 .xlsx 和 .xlsm 格式文件", type=["xlsx", "xlsm"], accept_multiple_files=True)
 
 if uploaded_files:
     st.divider()
@@ -944,10 +944,13 @@ if uploaded_files:
                          """.strip(), language="yaml")
 
             with row_col2:
+                # 使用 rsplit 动态切除原后缀并替换为 .json，兼容任何 Excel 后缀
+                export_filename = f"{file.name.rsplit('.', 1)[0]}.json"
+                
                 st.download_button(
                     label=f"📥 下载 JSON 文件",
                     data=json.dumps(res_json, indent=2, ensure_ascii=False),
-                    file_name=file.name.replace(".xlsx", ".json"),
+                    file_name=export_filename,
                     key=f"dl_{file.name}"
                 )
         except Exception as e:
